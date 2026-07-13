@@ -1,6 +1,7 @@
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     stripe_secret_key: str = Field(alias="STRIPE_SECRET_KEY")
     stripe_webhook_url: str = Field(alias="STRIPE_WEBHOOK_URL")
