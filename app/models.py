@@ -44,7 +44,7 @@ class Order(Base):
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, name="order_status"),
         default=OrderStatus.pending,
-        null=False,
+        nullable=False,
     )
 
     fulfillment_status: Mapped[FulfillmentStatus] = mapped_column(
