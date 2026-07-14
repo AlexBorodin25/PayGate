@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -15,7 +17,7 @@ LocalSession = sessionmaker(
 )
 
 
-def get_db():
+def get_db() -> Iterator[Session]:
     db: Session = LocalSession()
 
     try:
