@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -22,5 +23,18 @@ def get_db() -> Iterator[Session]:
 
     try:
         yield db
+    finally:
+        db.close()
+
+@contextmanager
+def standalone_session() -> Iterator[Session]:
+    db = LocalSession()
+
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
