@@ -26,6 +26,7 @@ def get_db() -> Iterator[Session]:
     finally:
         db.close()
 
+
 @contextmanager
 def standalone_session() -> Iterator[Session]:
     db = LocalSession()
