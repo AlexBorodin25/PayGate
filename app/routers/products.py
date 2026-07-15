@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Product
 from app.services.products import list_products
 
 router = APIRouter()
@@ -13,5 +12,17 @@ DatabaseSession = Annotated[Session, Depends(get_db)]
 
 
 @router.get("/products")
-def get_products(db: DatabaseSession) -> list[Product]:
-    return list_products(db)
+def get_products(db: DatabaseSession) -> list[dict[str, str | int]]:
+    products = list_products(db)
+
+    return [
+        {
+            "id": product.id,
+            "name": product.name,
+            "price": product.price,
+            "currency": product.currency,
+            "description": product.description,
+            "quantity_in_stock": product.quantity_in_stock,
+        }
+        for product in products
+    ]
