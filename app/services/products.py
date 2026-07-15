@@ -9,3 +9,10 @@ def list_products(db: Session) -> list[Product]:
 
 def get_product(db: Session, product_id: str) -> Product | None:
     return db.get(Product, product_id)
+
+
+def format_price(price: int, currency: str) -> str:
+    if currency.upper() == "USD":
+        return f"${price / 100:.2f}"
+
+    return f"{price} {currency}"
