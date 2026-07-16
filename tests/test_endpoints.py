@@ -41,7 +41,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 name="Portable Speaker",
                 price=4999,
                 currency="USD",
-                display_price="$49.99",
+                display_price="49.99 USD",
                 description="A waterproof Bluetooth speaker.",
                 quantity_in_stock=10,
             ),
@@ -50,7 +50,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 name="15.6 inch Business Laptop",
                 price=29999,
                 currency="USD",
-                display_price="$299.99",
+                display_price="299.99 USD",
                 description="A business laptop.",
                 quantity_in_stock=5,
             ),
@@ -59,7 +59,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 name="Full-Frame Mirrorless Camera",
                 price=34999,
                 currency="USD",
-                display_price="$349.99",
+                display_price="349.99 USD",
                 description="A 33MP full-frame mirrorless camera.",
                 quantity_in_stock=3,
             ),
@@ -82,4 +82,4 @@ def test_products_endpoint(monkeypatch: Any) -> None:
     assert products[0]["currency"] == "USD"
     assert products[0]["description"] == "A waterproof Bluetooth speaker."
     assert products[0]["quantity_in_stock"] == 10
-    assert products[0]["display_price"] == "$49.99"
+    assert products[0]["display_price"] == "49.99 USD"
