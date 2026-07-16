@@ -31,3 +31,8 @@ jobs:
 
       - name: Mypy check
         run: mypy app
+
+      - name: Run tests
+        env:
+          PYTHONPATH: .
+        run: pytest --cov=app --cov-report=term-missing
