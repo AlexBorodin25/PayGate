@@ -19,3 +19,7 @@ disallow_untyped_defs = true
 ignore_missing_imports = false
 disallow_untyped_decorators = false
 disallow_subclassing_any = false
+
+[tool.pytest.ini_options]
+pythonpath =["."]
+testpaths = ["test_endpoints"]

@@ -59,6 +59,20 @@ def fake_db() -> Iterator[None]:
     yield None
 
 
+def add_test_product(db_session) -> Product:
+    product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity_in_stock=10,
+    )
+    db_session.add(product)
+    db_session.commit()
+    return product
+
+
 def test_health_endpoint() -> None:
     client = TestClient(app)
 
@@ -125,16 +139,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
 
 
 def test_checkout_success(client, db_session, monkeypatch):
-    product = Product(
-        id="speaker",
-        name="Portable Speaker",
-        price=4999,
-        currency="USD",
-        description="A waterproof Bluetooth speaker.",
-        quantity_in_stock=10,
-    )
-    db_session.add(product)
-    db_session.commit()
+    add_test_product(db_session)
 
     fake_session = SimpleNamespace(
         id="test_1", url="https://checkout.stripe.com/test-session"
@@ -155,8 +160,8 @@ def test_checkout_success(client, db_session, monkeypatch):
     assert data["checkout_url"] == "https://checkout.stripe.com/test-session"
 
     order = db_session.get(Order, data["order_id"])
-    assert order.status == OrderStatus.pending
     assert order is not None
+    assert order.status == OrderStatus.pending
     assert order.amount == 4999
     assert order.currency == "USD"
     assert order.stripe_session_id == "test_1"
@@ -167,3 +172,67 @@ def test_checkout_unknown_product(client):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Product not found"
+
+
+def test_checkout_connection_error_pending_order(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    def raise_connection_error(**kwargs):
+        raise checkout_router.stripe.APIConnectionError(
+            message="Connection error",
+        )
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        raise_connection_error,
+    )
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 503
+
+    order = db_session.query(Order).one()
+    assert order.status == OrderStatus.pending
+    assert order.stripe_session_id is None
+
+
+def test_checkout_stripe_error_order_failed(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    def raise_stripe_error(**kwargs):
+        raise checkout_router.stripe.StripeError("Stripe rejected request")
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        raise_stripe_error,
+    )
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 502
+
+    order = db_session.query(Order).one()
+    assert order.status == OrderStatus.checkout_failed
+    assert order.stripe_session_id is None
+
+
+def test_checkout_without_url(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    fake_session = SimpleNamespace(id="test_1", url=None)
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        lambda **kwargs: fake_session,
+    )
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 502
+
+    order = db_session.query(Order).one()
+    assert order.status == OrderStatus.checkout_failed
+    assert order.stripe_session_id is None

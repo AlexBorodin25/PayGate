@@ -58,12 +58,19 @@ def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
             success_url=f"{settings.app_base_url}/success",
             cancel_url=f"{settings.app_base_url}/cancel",
         )
-    except stripe.error.StripeError as error:
+
+    except stripe.APIConnectionError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Stripe checkout status is unavailable.",
+        ) from error
+
+    except stripe.StripeError as error:
         order.status = OrderStatus.checkout_failed
         db.commit()
         raise HTTPException(
             status_code=502,
-            detail="Stripe Error",
+            detail="Could not create checkout session.",
         ) from error
 
     if session.url is None:
