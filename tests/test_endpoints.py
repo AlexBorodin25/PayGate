@@ -236,3 +236,23 @@ def test_checkout_without_url(client, db_session, monkeypatch):
     order = db_session.query(Order).one()
     assert order.status == OrderStatus.checkout_failed
     assert order.stripe_session_id is None
+
+
+def test_checkout_out_of_stock(client, db_session):
+    product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity_in_stock=0,
+    )
+    db_session.add(product)
+    db_session.commit()
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Product is out of stock"
+
+    assert db_session.query(Order).count() == 0

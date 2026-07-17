@@ -24,6 +24,9 @@ def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    if product.quantity_in_stock <= 0:
+        raise HTTPException(status_code=409, detail="Product is out of stock")
+
     order = Order(
         amount=product.price,
         currency=product.currency,
