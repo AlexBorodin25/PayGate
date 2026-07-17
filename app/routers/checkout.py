@@ -85,6 +85,7 @@ def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
         )
 
     order.stripe_session_id = session.id
+    order.livemode = session.livemode
     db.commit()
 
     return CheckoutResponse(

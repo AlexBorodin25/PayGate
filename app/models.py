@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -63,6 +63,8 @@ class Order(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+    livemode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class Product(Base):
