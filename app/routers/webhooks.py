@@ -27,7 +27,7 @@ async def stripe_webhook(
     payload = await request.body()
 
     try:
-        event = stripe.Webhook.construct_event(
+        event = stripe.Webhook.construct_event(  # type: ignore[no-untyped-call]
             payload,
             sig_header,
             settings.stripe_webhook_secret,
@@ -98,4 +98,3 @@ async def stripe_webhook(
     db.commit()
 
     return {"received": True}
-

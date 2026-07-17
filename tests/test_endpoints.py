@@ -142,7 +142,9 @@ def test_checkout_success(client, db_session, monkeypatch):
     add_test_product(db_session)
 
     fake_session = SimpleNamespace(
-        id="test_1", url="https://checkout.stripe.com/test-session"
+        id="test_1",
+        url="https://checkout.stripe.com/test-session",
+        livemode=False,
     )
 
     monkeypatch.setattr(
@@ -165,6 +167,7 @@ def test_checkout_success(client, db_session, monkeypatch):
     assert order.amount == 4999
     assert order.currency == "USD"
     assert order.stripe_session_id == "test_1"
+    assert order.livemode is False
 
 
 def test_checkout_unknown_product(client):
@@ -268,6 +271,7 @@ def test_checkout_uses_app_base_url(client, db_session, monkeypatch):
         return SimpleNamespace(
             id="test_1",
             url="https://checkout.stripe.com/test-session",
+            livemode=False,
         )
 
     monkeypatch.setattr(
