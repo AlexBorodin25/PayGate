@@ -95,7 +95,7 @@ def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
 
 @router.get("/success")
 def success() -> dict[str, str]:
-    return {"status": "success", "message": "Checkout complete."}
+    return {"status": "success", "message": "Payment confirmation is being processed."}
 
 
 @router.get("/cancel")

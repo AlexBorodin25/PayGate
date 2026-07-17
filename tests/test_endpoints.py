@@ -293,7 +293,7 @@ def test_success_page_does_not_mutate(client, db_session):
     assert response.status_code == 200
     assert response.json() == {
         "status": "success",
-        "message": "Checkout complete.",
+        "message": "Payment confirmation is being processed.",
     }
     assert db_session.query(Order).count() == 0
 
