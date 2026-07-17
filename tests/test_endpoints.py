@@ -256,3 +256,54 @@ def test_checkout_out_of_stock(client, db_session):
     assert response.json()["detail"] == "Product is out of stock"
 
     assert db_session.query(Order).count() == 0
+
+
+def test_checkout_uses_app_base_url(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    captured_kwargs = {}
+
+    def fake_create(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            id="test_1",
+            url="https://checkout.stripe.com/test-session",
+        )
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        fake_create,
+    )
+
+    response = client.post(
+        "/checkout",
+        json={"product_id": "speaker"},
+        headers={"host": "example.com"},
+    )
+
+    assert response.status_code == 200
+    assert captured_kwargs["success_url"] == "http://localhost:8000/success"
+    assert captured_kwargs["cancel_url"] == "http://localhost:8000/cancel"
+
+
+def test_success_page_does_not_mutate(client, db_session):
+    response = client.get("/success")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "success",
+        "message": "Checkout complete.",
+    }
+    assert db_session.query(Order).count() == 0
+
+
+def test_cancel_page_does_not_mutate(client, db_session):
+    response = client.get("/cancel")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "cancelled",
+        "message": "Checkout cancelled.",
+    }
+    assert db_session.query(Order).count() == 0

@@ -91,3 +91,13 @@ def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
         order_id=order.id,
         checkout_url=session.url,
     )
+
+
+@router.get("/success")
+def success() -> dict[str, str]:
+    return {"status": "success", "message": "Checkout complete."}
+
+
+@router.get("/cancel")
+def cancel() -> dict[str, str]:
+    return {"status": "cancelled", "message": "Checkout cancelled."}
