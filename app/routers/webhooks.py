@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models import Order
+from app.models import Order, OrderStatus, Product
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -50,15 +50,19 @@ async def stripe_webhook(
         return {"received": True}
 
     order_id = session.get("client_reference_id")
+    product_id = session.get("metadata", {}).get("product_id")
 
-    if order_id is None:
-        logger.warning("Stripe webhook missing client_reference_id.")
+    if order_id is None or product_id is None:
+        logger.warning("Stripe webhook missing checkout metadata.")
         return {"received": True}
 
     order = db.get(Order, int(order_id))
 
     if order is None:
         logger.warning("Stripe webhook referenced unknown order_id.")
+        return {"received": True}
+
+    if order.status == OrderStatus.paid:
         return {"received": True}
 
     if order.stripe_session_id != session.get("id"):
@@ -77,4 +81,21 @@ async def stripe_webhook(
         logger.warning("Stripe livemode mismatch for order_id.")
         return {"received": True}
 
+    product = db.get(Product, product_id)
+
+    if product is None:
+        logger.warning("Stripe webhook referenced unknown for product_id")
+        return {"received": True}
+
+    if product.quantity_in_stock <= 0:
+        logger.warning("Paid order_id cannot be fulfilled: out of stock")
+        return {"received": True}
+
+    product.quantity_in_stock -= 1
+    order.status = OrderStatus.paid
+    order.stripe_payment_intent = session.get("payment_intent")
+
+    db.commit()
+
     return {"received": True}
+
