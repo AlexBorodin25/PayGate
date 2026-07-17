@@ -3,7 +3,11 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 os.environ.setdefault("STRIPE_SECRET_KEY", "test")
 os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "test")
@@ -13,11 +17,60 @@ os.environ.setdefault("ORDERS_API_KEY", "test")
 
 from app.db import get_db
 from app.main import app
+from app.models import Base, Order, OrderStatus, Product
+from app.routers import checkout as checkout_router
 from app.routers import products as products_router
+
+
+@pytest.fixture
+def db_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestSession = sessionmaker(bind=engine)
+
+    Base.metadata.create_all(engine)
+
+    db = TestSession()
+
+    try:
+        yield db
+    finally:
+        db.close()
+        Base.metadata.drop_all(engine)
+
+
+@pytest.fixture
+def client(db_session) -> TestClient:
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
 
 
 def fake_db() -> Iterator[None]:
     yield None
+
+
+def add_test_product(db_session) -> Product:
+    product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity_in_stock=10,
+    )
+    db_session.add(product)
+    db_session.commit()
+    return product
 
 
 def test_health_endpoint() -> None:
@@ -83,3 +136,123 @@ def test_products_endpoint(monkeypatch: Any) -> None:
     assert products[0]["description"] == "A waterproof Bluetooth speaker."
     assert products[0]["quantity_in_stock"] == 10
     assert products[0]["display_price"] == "49.99 USD"
+
+
+def test_checkout_success(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    fake_session = SimpleNamespace(
+        id="test_1", url="https://checkout.stripe.com/test-session"
+    )
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        lambda **kwargs: fake_session,
+    )
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["order_id"] > 0
+    assert data["checkout_url"] == "https://checkout.stripe.com/test-session"
+
+    order = db_session.get(Order, data["order_id"])
+    assert order is not None
+    assert order.status == OrderStatus.pending
+    assert order.amount == 4999
+    assert order.currency == "USD"
+    assert order.stripe_session_id == "test_1"
+
+
+def test_checkout_unknown_product(client):
+    response = client.post("/checkout", json={"product_id": "unknown"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Product not found"
+
+
+def test_checkout_connection_error_pending_order(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    def raise_connection_error(**kwargs):
+        raise checkout_router.stripe.APIConnectionError(
+            message="Connection error",
+        )
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        raise_connection_error,
+    )
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 503
+
+    order = db_session.query(Order).one()
+    assert order.status == OrderStatus.pending
+    assert order.stripe_session_id is None
+
+
+def test_checkout_stripe_error_order_failed(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    def raise_stripe_error(**kwargs):
+        raise checkout_router.stripe.StripeError("Stripe rejected request")
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        raise_stripe_error,
+    )
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 502
+
+    order = db_session.query(Order).one()
+    assert order.status == OrderStatus.checkout_failed
+    assert order.stripe_session_id is None
+
+
+def test_checkout_without_url(client, db_session, monkeypatch):
+    add_test_product(db_session)
+
+    fake_session = SimpleNamespace(id="test_1", url=None)
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        lambda **kwargs: fake_session,
+    )
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 502
+
+    order = db_session.query(Order).one()
+    assert order.status == OrderStatus.checkout_failed
+    assert order.stripe_session_id is None
+
+
+def test_checkout_out_of_stock(client, db_session):
+    product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity_in_stock=0,
+    )
+    db_session.add(product)
+    db_session.commit()
+
+    response = client.post("/checkout", json={"product_id": "speaker"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Product is out of stock"
+
+    assert db_session.query(Order).count() == 0

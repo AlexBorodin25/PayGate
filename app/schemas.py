@@ -11,3 +11,12 @@ class ProductResponse(BaseModel):
     quantity_in_stock: int
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CheckoutRequest(BaseModel):
+    product_id: str
+
+
+class CheckoutResponse(BaseModel):
+    order_id: int
+    checkout_url: str
