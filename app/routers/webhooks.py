@@ -1,8 +1,10 @@
 import logging
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -56,45 +58,53 @@ async def stripe_webhook(
         logger.warning("Stripe webhook missing checkout metadata.")
         return {"received": True}
 
-    order = db.get(Order, int(order_id))
+    with db.begin():
+        order = db.execute(
+            select(Order).where(Order.id == int(order_id)).with_for_update()
+        ).scalar_one_or_none()
 
-    if order is None:
-        logger.warning("Stripe webhook referenced unknown order_id.")
-        return {"received": True}
+        if order is None:
+            logger.warning("Stripe webhook referenced unknown order_id.")
+            return {"received": True}
 
-    if order.status == OrderStatus.paid:
-        return {"received": True}
+        if order.status == OrderStatus.paid:
+            return {"received": True}
 
-    if order.stripe_session_id != session.get("id"):
-        logger.warning("Stripe session does not match order_id.")
-        return {"received": True}
+        if order.stripe_session_id != session.get("id"):
+            logger.warning("Stripe session does not match order_id.")
+            return {"received": True}
 
-    if order.amount != session.get("amount_total"):
-        logger.warning("Stripe amount mismatch for order_id.")
-        return {"received": True}
+        if order.amount != session.get("amount_total"):
+            logger.warning("Stripe amount mismatch for order_id.")
+            return {"received": True}
 
-    if order.currency.lower() != session.get("currency"):
-        logger.warning("Stripe currency mismatch for order_id.")
-        return {"received": True}
+        if order.currency.lower() != session.get("currency"):
+            logger.warning("Stripe currency mismatch for order_id.")
+            return {"received": True}
 
-    if order.livemode != session.get("livemode"):
-        logger.warning("Stripe livemode mismatch for order_id.")
-        return {"received": True}
+        if order.livemode != session.get("livemode"):
+            logger.warning("Stripe livemode mismatch for order_id.")
+            return {"received": True}
 
-    product = db.get(Product, product_id)
+    stock_update = cast(
+        CursorResult[Any],
+        db.execute(
+            update(Product)
+            .where(Product.id == product_id)
+            .where(Product.quantity_in_stock > 0)
+            .values(quantity_in_stock=Product.quantity_in_stock - 1)
+        ),
+    )
 
-    if product is None:
-        logger.warning("Stripe webhook referenced unknown for product_id")
-        return {"received": True}
-
-    if product.quantity_in_stock <= 0:
-        logger.warning("Paid order_id cannot be fulfilled: out of stock")
-        return {"received": True}
-
-    product.quantity_in_stock -= 1
     order.status = OrderStatus.paid
     order.stripe_payment_intent = session.get("payment_intent")
 
-    db.commit()
+    if stock_update.rowcount != 1:
+        logger.error(
+            "Order could not be completed. This product is out of stock.",
+            order.id,
+            product_id,
+        )
+        return {"received": True}
 
     return {"received": True}
