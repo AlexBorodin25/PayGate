@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.schemas import ProductResponse
@@ -9,12 +9,12 @@ from app.services.products import format_price, list_products
 
 router = APIRouter()
 
-DatabaseSession = Annotated[Session, Depends(get_db)]
+DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.get("/products", response_model=list[ProductResponse])
-def get_products(db: DatabaseSession) -> list[ProductResponse]:
-    products = list_products(db)
+async def get_products(db: DatabaseSession) -> list[ProductResponse]:
+    products = await list_products(db)
 
     return [
         ProductResponse(

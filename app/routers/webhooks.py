@@ -5,7 +5,7 @@ import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
@@ -58,9 +58,11 @@ async def stripe_webhook(
         logger.warning("Stripe webhook missing checkout metadata.")
         return {"received": True}
 
-    with db.begin():
-        order = db.execute(
-            select(Order).where(Order.id == int(order_id)).with_for_update()
+    async with (db.begin()):
+        order =(
+            await db.execute(
+                select(Order).where(Order.id == int(order_id)).with_for_update()
+            )
         ).scalar_one_or_none()
 
         if order is None:
@@ -88,7 +90,7 @@ async def stripe_webhook(
 
     stock_update = cast(
         CursorResult[Any],
-        db.execute(
+        await db.execute(
             update(Product)
             .where(Product.id == product_id)
             .where(Product.quantity_in_stock > 0)
