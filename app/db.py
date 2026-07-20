@@ -1,41 +1,32 @@
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
 
-engine = create_engine(
+engine = create_async_engine(
     settings.database_url,
     pool_pre_ping=True,
 )
 
-LocalSession = sessionmaker(
+AsyncSessionLocal = async_sessionmaker(
     bind=engine,
-    autoflush=False,
-    autocommit=False,
+    expire_on_commit=False,
 )
 
 
-def get_db() -> Iterator[Session]:
-    db: Session = LocalSession()
-
-    try:
+async def get_db() -> AsyncIterator[AsyncSession]:
+    async with AsyncSessionLocal() as db:
         yield db
-    finally:
-        db.close()
 
 
-@contextmanager
-def standalone_session() -> Iterator[Session]:
-    db = LocalSession()
-
-    try:
-        yield db
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+@asynccontextmanager
+async def standalone_session() -> AsyncIterator[AsyncSession]:
+    async with AsyncSessionLocal() as db:
+        try:
+            yield db
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
