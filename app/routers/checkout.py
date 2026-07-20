@@ -98,7 +98,10 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
 
 @router.get("/success")
 async def success() -> dict[str, str]:
-    return {"status": "pending_confirmation", "message": "Payment confirmation is being processed."}
+    return {
+        "status": "pending_confirmation",
+        "message": "Payment confirmation is being processed.",
+    }
 
 
 @router.get("/cancel")

@@ -22,4 +22,4 @@ disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 pythonpath =["."]
-testpaths = ["test_endpoints"]
+testpaths = ["tests"]

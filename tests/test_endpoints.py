@@ -1,17 +1,17 @@
 import os
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 os.environ.setdefault("STRIPE_SECRET_KEY", "test")
 os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "test")
-os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost/test")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("APP_BASE_URL", "http://localhost:8000")
 os.environ.setdefault("ORDERS_API_KEY", "test")
 
@@ -23,28 +23,33 @@ from app.routers import products as products_router
 
 
 @pytest.fixture
-def db_session():
-    engine = create_engine(
-        "sqlite://",
+async def db_session() -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    TestSession = sessionmaker(bind=engine)
 
-    Base.metadata.create_all(engine)
+    TestSession = async_sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+    )
 
-    db = TestSession()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
-    try:
+    async with TestSession() as db:
         yield db
-    finally:
-        db.close()
-        Base.metadata.drop_all(engine)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+    await engine.dispose()
 
 
 @pytest.fixture
-def client(db_session) -> TestClient:
-    def override_get_db():
+async def client(db_session: AsyncSession) -> AsyncIterator[TestClient]:
+    async def override_get_db() -> AsyncIterator[AsyncSession]:
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
@@ -55,11 +60,11 @@ def client(db_session) -> TestClient:
         app.dependency_overrides.clear()
 
 
-def fake_db() -> Iterator[None]:
+async def fake_db() -> AsyncIterator[None]:
     yield None
 
 
-def add_test_product(db_session) -> Product:
+async def add_test_product(db_session: AsyncSession) -> Product:
     product = Product(
         id="speaker",
         name="Portable Speaker",
@@ -69,7 +74,7 @@ def add_test_product(db_session) -> Product:
         quantity_in_stock=10,
     )
     db_session.add(product)
-    db_session.commit()
+    await db_session.commit()
     return product
 
 
@@ -85,16 +90,13 @@ def test_health_endpoint() -> None:
 def test_products_endpoint(monkeypatch: Any) -> None:
     app.dependency_overrides[get_db] = fake_db
 
-    monkeypatch.setattr(
-        products_router,
-        "list_products",
-        lambda db: [
+    async def fake_list_products(db: Any) -> list[SimpleNamespace]:
+        return [
             SimpleNamespace(
                 id="speaker",
                 name="Portable Speaker",
                 price=4999,
                 currency="USD",
-                display_price="49.99 USD",
                 description="A waterproof Bluetooth speaker.",
                 quantity_in_stock=10,
             ),
@@ -103,7 +105,6 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 name="15.6 inch Business Laptop",
                 price=29999,
                 currency="USD",
-                display_price="299.99 USD",
                 description="A business laptop.",
                 quantity_in_stock=5,
             ),
@@ -112,12 +113,12 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 name="Full-Frame Mirrorless Camera",
                 price=34999,
                 currency="USD",
-                display_price="349.99 USD",
                 description="A 33MP full-frame mirrorless camera.",
                 quantity_in_stock=3,
             ),
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(products_router, "list_products", fake_list_products)
 
     client = TestClient(app)
     response = client.get("/products")
@@ -138,8 +139,11 @@ def test_products_endpoint(monkeypatch: Any) -> None:
     assert products[0]["display_price"] == "49.99 USD"
 
 
-def test_checkout_success(client, db_session, monkeypatch):
-    add_test_product(db_session)
+@pytest.mark.anyio
+async def test_checkout_success(
+    client: TestClient, db_session: AsyncSession, monkeypatch: Any
+) -> None:
+    await add_test_product(db_session)
 
     fake_session = SimpleNamespace(
         id="test_1",
@@ -161,7 +165,7 @@ def test_checkout_success(client, db_session, monkeypatch):
     assert data["order_id"] > 0
     assert data["checkout_url"] == "https://checkout.stripe.com/test-session"
 
-    order = db_session.get(Order, data["order_id"])
+    order = await db_session.get(Order, data["order_id"])
     assert order is not None
     assert order.status == OrderStatus.pending
     assert order.amount == 4999
@@ -170,17 +174,23 @@ def test_checkout_success(client, db_session, monkeypatch):
     assert order.livemode is False
 
 
-def test_checkout_unknown_product(client):
+@pytest.mark.anyio
+async def test_checkout_unknown_product(client: TestClient) -> None:
     response = client.post("/checkout", json={"product_id": "unknown"})
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Product not found"
 
 
-def test_checkout_connection_error_pending_order(client, db_session, monkeypatch):
-    add_test_product(db_session)
+@pytest.mark.anyio
+async def test_checkout_connection_error_pending_order(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    await add_test_product(db_session)
 
-    def raise_connection_error(**kwargs):
+    def raise_connection_error(**kwargs: Any) -> None:
         raise checkout_router.stripe.APIConnectionError(
             message="Connection error",
         )
@@ -195,15 +205,20 @@ def test_checkout_connection_error_pending_order(client, db_session, monkeypatch
 
     assert response.status_code == 503
 
-    order = db_session.query(Order).one()
+    order = (await db_session.execute(select(Order))).scalar_one()
     assert order.status == OrderStatus.pending
     assert order.stripe_session_id is None
 
 
-def test_checkout_stripe_error_order_failed(client, db_session, monkeypatch):
-    add_test_product(db_session)
+@pytest.mark.anyio
+async def test_checkout_stripe_error_order_failed(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    await add_test_product(db_session)
 
-    def raise_stripe_error(**kwargs):
+    def raise_stripe_error(**kwargs: Any) -> None:
         raise checkout_router.stripe.StripeError("Stripe rejected request")
 
     monkeypatch.setattr(
@@ -216,15 +231,20 @@ def test_checkout_stripe_error_order_failed(client, db_session, monkeypatch):
 
     assert response.status_code == 502
 
-    order = db_session.query(Order).one()
+    order = (await db_session.execute(select(Order))).scalar_one()
     assert order.status == OrderStatus.checkout_failed
     assert order.stripe_session_id is None
 
 
-def test_checkout_without_url(client, db_session, monkeypatch):
-    add_test_product(db_session)
+@pytest.mark.anyio
+async def test_checkout_without_url(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    await add_test_product(db_session)
 
-    fake_session = SimpleNamespace(id="test_1", url=None)
+    fake_session = SimpleNamespace(id="test_1", url=None, livemode=False)
 
     monkeypatch.setattr(
         checkout_router.stripe.checkout.Session,
@@ -236,12 +256,16 @@ def test_checkout_without_url(client, db_session, monkeypatch):
 
     assert response.status_code == 502
 
-    order = db_session.query(Order).one()
+    order = (await db_session.execute(select(Order))).scalar_one()
     assert order.status == OrderStatus.checkout_failed
     assert order.stripe_session_id is None
 
 
-def test_checkout_out_of_stock(client, db_session):
+@pytest.mark.anyio
+async def test_checkout_out_of_stock(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
     product = Product(
         id="speaker",
         name="Portable Speaker",
@@ -251,22 +275,28 @@ def test_checkout_out_of_stock(client, db_session):
         quantity_in_stock=0,
     )
     db_session.add(product)
-    db_session.commit()
+    await db_session.commit()
 
     response = client.post("/checkout", json={"product_id": "speaker"})
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Product is out of stock"
 
-    assert db_session.query(Order).count() == 0
+    orders = (await db_session.execute(select(Order))).scalars().all()
+    assert len(orders) == 0
 
 
-def test_checkout_uses_app_base_url(client, db_session, monkeypatch):
-    add_test_product(db_session)
+@pytest.mark.anyio
+async def test_checkout_uses_app_base_url(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    await add_test_product(db_session)
 
     captured_kwargs = {}
 
-    def fake_create(**kwargs):
+    def fake_create(**kwargs: Any) -> SimpleNamespace:
         captured_kwargs.update(kwargs)
         return SimpleNamespace(
             id="test_1",
@@ -291,18 +321,28 @@ def test_checkout_uses_app_base_url(client, db_session, monkeypatch):
     assert captured_kwargs["cancel_url"] == "http://localhost:8000/cancel"
 
 
-def test_success_page_does_not_mutate(client, db_session):
+@pytest.mark.anyio
+async def test_success_page_does_not_mutate(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
     response = client.get("/success")
 
     assert response.status_code == 200
     assert response.json() == {
-        "status": "success",
+        "status": "pending_confirmation",
         "message": "Payment confirmation is being processed.",
     }
-    assert db_session.query(Order).count() == 0
+
+    orders = (await db_session.execute(select(Order))).scalars().all()
+    assert len(orders) == 0
 
 
-def test_cancel_page_does_not_mutate(client, db_session):
+@pytest.mark.anyio
+async def test_cancel_page_does_not_mutate(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
     response = client.get("/cancel")
 
     assert response.status_code == 200
@@ -310,4 +350,6 @@ def test_cancel_page_does_not_mutate(client, db_session):
         "status": "cancelled",
         "message": "Checkout cancelled.",
     }
-    assert db_session.query(Order).count() == 0
+
+    orders = (await db_session.execute(select(Order))).scalars().all()
+    assert len(orders) == 0

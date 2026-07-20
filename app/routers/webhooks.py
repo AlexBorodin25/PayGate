@@ -9,12 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.models import Order, OrderStatus, Product
+from app.models import FulfillmentStatus, Order, OrderStatus, Product
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-DatabaseSession = Annotated[Session, Depends(get_db)]
+DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.post("/webhooks/stripe")
@@ -36,11 +36,13 @@ async def stripe_webhook(
         )
     except ValueError as error:
         raise HTTPException(
-            status_code=400, detail="Invalid webhook payload."
+            status_code=400,
+            detail="Invalid webhook payload.",
         ) from error
     except stripe.SignatureVerificationError as error:
         raise HTTPException(
-            status_code=400, detail="Invalid Stripe signature."
+            status_code=400,
+            detail="Invalid Stripe signature.",
         ) from error
 
     if event["type"] != "checkout.session.completed":
@@ -58,8 +60,8 @@ async def stripe_webhook(
         logger.warning("Stripe webhook missing checkout metadata.")
         return {"received": True}
 
-    async with (db.begin()):
-        order =(
+    async with db.begin():
+        order = (
             await db.execute(
                 select(Order).where(Order.id == int(order_id)).with_for_update()
             )
@@ -88,25 +90,28 @@ async def stripe_webhook(
             logger.warning("Stripe livemode mismatch for order_id.")
             return {"received": True}
 
-    stock_update = cast(
-        CursorResult[Any],
-        await db.execute(
-            update(Product)
-            .where(Product.id == product_id)
-            .where(Product.quantity_in_stock > 0)
-            .values(quantity_in_stock=Product.quantity_in_stock - 1)
-        ),
-    )
-
-    order.status = OrderStatus.paid
-    order.stripe_payment_intent = session.get("payment_intent")
-
-    if stock_update.rowcount != 1:
-        logger.error(
-            "Order could not be completed. This product is out of stock.",
-            order.id,
-            product_id,
+        stock_update = cast(
+            CursorResult[Any],
+            await db.execute(
+                update(Product)
+                .where(Product.id == product_id)
+                .where(Product.quantity_in_stock > 0)
+                .values(quantity_in_stock=Product.quantity_in_stock - 1)
+            ),
         )
-        return {"received": True}
+
+        order.status = OrderStatus.paid
+        order.stripe_payment_intent = session.get("payment_intent")
+
+        if stock_update.rowcount != 1:
+            order.fulfillment_status = FulfillmentStatus.pending
+            logger.error(
+                "Paid order_id=%s could not be fulfilled: product_id=%s out of stock",
+                order.id,
+                product_id,
+            )
+            return {"received": True}
+
+        order.fulfillment_status = FulfillmentStatus.fulfilled
 
     return {"received": True}
