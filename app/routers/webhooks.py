@@ -19,7 +19,28 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 async def run_fulfillment(order_id: int) -> None:
     async with standalone_session() as db:
-        logger.info("Fulfillment queued for order_id")
+        claim_update = cast(
+            CursorResult[Any],
+            await db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .where(Order.fulfillment_status == FulfillmentStatus.pending)
+                .values(fulfillment_status=FulfillmentStatus.processing)
+            )
+        )
+
+        if claim_update.rowcount != 1:
+            logger.info("Fulfillment already claimed.")
+            return
+
+        logger.info("Fulfillment claimed.")
+
+        await db.execute(
+            update(Order)
+            .where(Order.id == order_id)
+            .where(Order.fulfillment_status == FulfillmentStatus.processing)
+            .values(fulfillment_status=FulfillmentStatus.fulfilled)
+        )
 
 @router.post(
     "/webhooks/stripe",
@@ -136,7 +157,7 @@ async def stripe_webhook(
                     .values(
                         status=OrderStatus.paid,
                         stripe_payment_intent=payment_intent,
-                        fulfillment_status=FulfillmentStatus.processing,
+                        fulfillment_status=FulfillmentStatus.pending,
                     )
                 ),
             )
