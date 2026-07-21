@@ -96,9 +96,7 @@ async def stripe_webhook(
 
             order = (
                 await db.execute(
-                    select(Order)
-                    .where(Order.id == parsed_order_id)
-                    .with_for_update()
+                    select(Order).where(Order.id == parsed_order_id).with_for_update()
                 )
             ).scalar_one_or_none()
 
