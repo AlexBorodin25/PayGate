@@ -2,7 +2,7 @@ import logging
 from typing import Annotated, Any, cast
 
 import stripe
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
+def run_fulfillment(order_id: int) -> None:
+    logger.info("Fulfillment queued for order_id")
 
 @router.post(
     "/webhooks/stripe",
@@ -34,6 +36,7 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 async def stripe_webhook(
     request: Request,
     db: DatabaseSession,
+    background_tasks: BackgroundTasks,
     sig_header: str | None = Header(default=None, alias="Stripe-Signature"),
 ) -> dict[str, bool]:
     if sig_header is None:
@@ -150,9 +153,6 @@ async def stripe_webhook(
         ) from error
 
     if won_paid_transition:
-        logger.info(
-            "Order paid; fulfillment can be scheduled.",
-            parsed_order_id,
-        )
+        background_tasks.add_task(run_fulfillment, parsed_order_id)
 
     return {"received": True}
