@@ -72,6 +72,7 @@ async def add_test_product(db_session: AsyncSession) -> Product:
         currency="USD",
         description="A waterproof Bluetooth speaker.",
         quantity=10,
+        is_deleted=False,
     )
     db_session.add(product)
     await db_session.commit()
@@ -273,6 +274,7 @@ async def test_checkout_out_of_stock(
         currency="USD",
         description="A waterproof Bluetooth speaker.",
         quantity=0,
+        is_deleted=False,
     )
     db_session.add(product)
     await db_session.commit()
@@ -353,3 +355,67 @@ async def test_cancel_page_does_not_mutate(
 
     orders = (await db_session.execute(select(Order))).scalars().all()
     assert len(orders) == 0
+
+
+@pytest.mark.anyio
+async def test_deleted_products_in_products(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
+    active_product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity=10,
+        is_deleted=False,
+    )
+    deleted_product = Product(
+        id="deleted-speaker",
+        name="Deleted Speaker",
+        price=4999,
+        currency="USD",
+        description="This product should not show.",
+        quantity=10,
+        is_deleted=True,
+    )
+
+    db_session.add_all([active_product, deleted_product])
+    await db_session.commit()
+
+    response = client.get("/products")
+
+    assert response.status_code == 200
+
+    products = response.json()
+    product_ids = {product["id"] for product in products}
+
+    assert "speaker" in product_ids
+    assert "deleted-speaker" not in product_ids
+
+@pytest.mark.anyio
+async def test_deleted_product_cannot_be_checked_out(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
+    deleted_product = Product(
+        id="deleted-speaker",
+        name="Deleted Speaker",
+        price=4999,
+        currency="USD",
+        description="This product should not be purchasable.",
+        quantity=10,
+        is_deleted=True,
+    )
+
+    db_session.add(deleted_product)
+    await db_session.commit()
+
+    response = client.post(
+        "/checkout",
+        json={"product_id": "deleted-speaker"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Product not found"
