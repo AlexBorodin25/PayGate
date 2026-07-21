@@ -4,6 +4,7 @@ from typing import Annotated
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -70,38 +71,54 @@ async def stripe_webhook(
         logger.warning("Stripe webhook missing checkout metadata.")
         return {"received": True}
 
-    async with db.begin():
-        order = (
-            await db.execute(
-                select(Order).where(Order.id == int(order_id)).with_for_update()
-            )
-        ).scalar_one_or_none()
+    try:
+        parsed_order_id = int(order_id)
+    except ValueError:
+        logger.warning("Stripe webhook had malformed order_id.")
+        return {"received": True}
 
-        if order is None:
-            logger.warning("Stripe webhook referenced unknown order_id.")
-            return {"received": True}
+    try:
+        async with db.begin():
+            order = (
+                await db.execute(
+                    select(Order)
+                    .where(Order.id == parsed_order_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
 
-        if order.status != OrderStatus.pending:
-            return {"received": True}
+            if order is None:
+                logger.warning("Stripe webhook referenced unknown order_id.")
+                return {"received": True}
 
-        if order.stripe_session_id != session.get("id"):
-            logger.warning("Stripe session does not match order_id.")
-            return {"received": True}
+            if order.status != OrderStatus.pending:
+                return {"received": True}
 
-        if order.amount != session.get("amount_total"):
-            logger.warning("Stripe amount mismatch for order_id.")
-            return {"received": True}
+            if order.stripe_session_id != session.get("id"):
+                logger.warning("Stripe session does not match order_id.")
+                return {"received": True}
 
-        if order.currency.lower() != session.get("currency"):
-            logger.warning("Stripe currency mismatch for order_id.")
-            return {"received": True}
+            if order.amount != session.get("amount_total"):
+                logger.warning("Stripe amount mismatch for order_id.")
+                return {"received": True}
 
-        if order.livemode != session.get("livemode"):
-            logger.warning("Stripe livemode mismatch for order_id.")
-            return {"received": True}
+            if order.currency.lower() != session.get("currency"):
+                logger.warning("Stripe currency mismatch for order_id.")
+                return {"received": True}
 
-        order.status = OrderStatus.paid
-        order.stripe_payment_intent = session.get("payment_intent")
-        order.fulfillment_status = FulfillmentStatus.fulfilled
+            if order.livemode != session.get("livemode"):
+                logger.warning("Stripe livemode mismatch for order_id.")
+                return {"received": True}
+
+            order.status = OrderStatus.paid
+            order.stripe_payment_intent = session.get("payment_intent")
+            order.fulfillment_status = FulfillmentStatus.fulfilled
+
+    except SQLAlchemyError as error:
+        logger.exception("Transient database error while processing Stripe webhook.")
+        raise HTTPException(
+            status_code=500,
+            detail="Temporary database error.",
+        ) from error
 
     return {"received": True}
