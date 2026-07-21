@@ -4,12 +4,12 @@ from typing import Annotated
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.models import FulfillmentStatus, Order, OrderStatus
+from app.models import FulfillmentStatus, Order, OrderStatus, ProcessedWebhookEvent
 
 router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
     ),
     responses={
         400: {"description": "Invalid, or unverifiable Stripe webhook payload"},
+        500: {"description": "Temporary database error"},
     },
 )
 async def stripe_webhook(
@@ -56,6 +57,11 @@ async def stripe_webhook(
             detail="Invalid Stripe signature.",
         ) from error
 
+    event_id = event.get("id")
+    if event_id is None:
+        logger.warning("Stripe webhook missing event id.")
+        return {"received": True}
+
     if event["type"] != "checkout.session.completed":
         return {"received": True}
 
@@ -79,16 +85,20 @@ async def stripe_webhook(
 
     try:
         async with db.begin():
+            db.add(ProcessedWebhookEvent(event_id=event_id))
+            await db.flush()
+
             order = (
                 await db.execute(
-                    select(Order)
-                    .where(Order.id == parsed_order_id)
-                    .with_for_update()
+                    select(Order).where(Order.id == parsed_order_id).with_for_update()
                 )
             ).scalar_one_or_none()
 
             if order is None:
-                logger.warning("Stripe webhook referenced unknown order_id.")
+                logger.warning(
+                    "Stripe webhook referenced unknown order_id.",
+                    parsed_order_id,
+                )
                 return {"received": True}
 
             if order.status != OrderStatus.pending:
@@ -114,6 +124,9 @@ async def stripe_webhook(
             order.stripe_payment_intent = session.get("payment_intent")
             order.fulfillment_status = FulfillmentStatus.fulfilled
 
+    except IntegrityError:
+        logger.info("Duplicate Stripe webhook event ignored")
+        return {"received": True}
     except SQLAlchemyError as error:
         logger.exception("Transient database error while processing Stripe webhook.")
         raise HTTPException(
