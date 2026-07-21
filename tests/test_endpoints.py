@@ -394,6 +394,7 @@ async def test_deleted_products_in_products(
     assert "speaker" in product_ids
     assert "deleted-speaker" not in product_ids
 
+
 @pytest.mark.anyio
 async def test_deleted_product_cannot_be_checked_out(
     client: TestClient,

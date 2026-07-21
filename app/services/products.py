@@ -6,9 +6,7 @@ from app.models import Product
 
 async def list_products(db: AsyncSession) -> list[Product]:
     result = await db.scalars(
-        select(Product)
-        .where(Product.is_deleted == False)
-        .order_by(Product.name)
+        select(Product).where(Product.is_deleted.is_(False)).order_by(Product.name)
     )
     return list(result)
 

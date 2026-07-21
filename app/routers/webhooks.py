@@ -71,7 +71,7 @@ async def stripe_webhook(
             logger.warning("Stripe webhook referenced unknown order_id.")
             return {"received": True}
 
-        if order.status == OrderStatus.paid:
+        if order.status != OrderStatus.pending:
             return {"received": True}
 
         if order.stripe_session_id != session.get("id"):

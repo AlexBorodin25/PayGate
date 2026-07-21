@@ -5,16 +5,16 @@ Revises: 3165a584a679
 Create Date: 2026-07-21 11:46:56.833446
 
 """
-from collections.abc import Sequence
 
-from alembic import op
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 
+from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = '257fe8bff0c7'
-down_revision: str | Sequence[str] | None = '3165a584a679'
+revision: str = "257fe8bff0c7"
+down_revision: str | Sequence[str] | None = "3165a584a679"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
