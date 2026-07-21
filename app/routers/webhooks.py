@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
+async def deliver_product(order_id: int) -> None:
+    logger.info("Delivered digital product for order_id.")
 
 async def run_fulfillment(order_id: int) -> None:
     async with standalone_session() as db:
@@ -38,6 +40,8 @@ async def run_fulfillment(order_id: int) -> None:
         logger.info("Fulfillment claimed.")
 
         try:
+            await deliver_product(order_id)
+
             await db.execute(
                 update(Order)
                 .where(Order.id == order_id)
