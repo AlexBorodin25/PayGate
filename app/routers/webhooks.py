@@ -95,8 +95,8 @@ async def stripe_webhook(
             await db.execute(
                 update(Product)
                 .where(Product.id == product_id)
-                .where(Product.quantity_in_stock > 0)
-                .values(quantity_in_stock=Product.quantity_in_stock - 1)
+                .where(Product.quantity > 0)
+                .values(quantity=Product.quantity - 1)
             ),
         )
 

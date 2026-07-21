@@ -71,7 +71,7 @@ async def add_test_product(db_session: AsyncSession) -> Product:
         price=4999,
         currency="USD",
         description="A waterproof Bluetooth speaker.",
-        quantity_in_stock=10,
+        quantity=10,
     )
     db_session.add(product)
     await db_session.commit()
@@ -98,7 +98,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 price=4999,
                 currency="USD",
                 description="A waterproof Bluetooth speaker.",
-                quantity_in_stock=10,
+                quantity=10,
             ),
             SimpleNamespace(
                 id="laptop",
@@ -106,7 +106,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 price=29999,
                 currency="USD",
                 description="A business laptop.",
-                quantity_in_stock=5,
+                quantity=5,
             ),
             SimpleNamespace(
                 id="camera",
@@ -114,7 +114,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 price=34999,
                 currency="USD",
                 description="A 33MP full-frame mirrorless camera.",
-                quantity_in_stock=3,
+                quantity=3,
             ),
         ]
 
@@ -135,7 +135,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
     assert products[0]["price"] == 4999
     assert products[0]["currency"] == "USD"
     assert products[0]["description"] == "A waterproof Bluetooth speaker."
-    assert products[0]["quantity_in_stock"] == 10
+    assert products[0]["quantity"] == 10
     assert products[0]["display_price"] == "49.99 USD"
 
 
@@ -272,7 +272,7 @@ async def test_checkout_out_of_stock(
         price=4999,
         currency="USD",
         description="A waterproof Bluetooth speaker.",
-        quantity_in_stock=0,
+        quantity=0,
     )
     db_session.add(product)
     await db_session.commit()

@@ -1,13 +1,15 @@
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.db import get_db
-from app.models import Order, OrderStatus
+from app.models import Order, OrderStatus, Product
 from app.schemas import CheckoutRequest, CheckoutResponse
 from app.services.products import get_product
 
@@ -25,7 +27,17 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    if product.quantity_in_stock <= 0:
+    stock_update = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(Product)
+            .where(Product.id == product.id)
+            .where(Product.quantity > 0)
+            .values(quantity=Product.quantity - 1)
+        ),
+    )
+
+    if stock_update.rowcount != 1:
         raise HTTPException(status_code=409, detail="Product is out of stock")
 
     order = Order(
@@ -72,6 +84,11 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
 
     except stripe.StripeError as error:
         order.status = OrderStatus.checkout_failed
+        await db.execute(
+            update(Product)
+            .where(Product.id == product.id)
+            .values(quantity=Product.quantity + 1)
+        )
         await db.commit()
         raise HTTPException(
             status_code=502,
@@ -80,6 +97,11 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
 
     if session.url is None:
         order.status = OrderStatus.checkout_failed
+        await db.execute(
+            update(Product)
+            .where(Product.id == product.id)
+            .values(quantity=Product.quantity + 1)
+        )
         await db.commit()
         raise HTTPException(
             status_code=502,

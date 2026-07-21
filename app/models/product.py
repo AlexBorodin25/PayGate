@@ -12,4 +12,4 @@ class Product(Base):
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    quantity_in_stock: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)

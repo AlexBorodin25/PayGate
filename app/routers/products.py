@@ -24,7 +24,7 @@ async def get_products(db: DatabaseSession) -> list[ProductResponse]:
             currency=product.currency,
             display_price=format_price(product.price, product.currency),
             description=product.description,
-            quantity_in_stock=product.quantity_in_stock,
+            quantity=product.quantity,
         )
         for product in products
     ]
