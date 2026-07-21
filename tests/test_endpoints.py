@@ -439,10 +439,11 @@ async def test_webhook_ignores_other_event_types(
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
         "construct_event",
-        lambda payload, sig_header, secret: {
-            "type": "customer.created",
-            "data": {"object": {}},
-        },
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_test_customer_created",
+            type="customer.created",
+            data=SimpleNamespace(object=SimpleNamespace()),
+        ),
     )
 
     response = client.post(
@@ -463,14 +464,15 @@ async def test_webhook_ignores_unpaid_checkout(
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
         "construct_event",
-        lambda payload, sig_header, secret: {
-            "type": "checkout.session.completed",
-            "data": {
-                "object": {
-                    "payment_status": "unpaid",
-                }
-            },
-        },
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_test_unpaid",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    payment_status="unpaid",
+                )
+            ),
+        ),
     )
 
     response = client.post(
@@ -501,32 +503,34 @@ async def add_test_order(
 
 
 @pytest.mark.anyio
-async def test_webhook_marks_order_paid_and_fulfilled(
+async def test_webhook_marks_order_paid_and_processing(
     client: TestClient,
     db_session: AsyncSession,
     monkeypatch: Any,
 ) -> None:
     product = await add_test_product(db_session)
     order = await add_test_order(db_session, product)
+    await db_session.rollback()
 
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
         "construct_event",
-        lambda payload, sig_header, secret: {
-            "type": "checkout.session.completed",
-            "data": {
-                "object": {
-                    "id": "cs_test_123",
-                    "payment_status": "paid",
-                    "client_reference_id": str(order.id),
-                    "metadata": {"product_id": product.id},
-                    "amount_total": product.price,
-                    "currency": product.currency.lower(),
-                    "livemode": False,
-                    "payment_intent": "pi_test_123",
-                }
-            },
-        },
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_test_paid",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    id="cs_test_123",
+                    payment_status="paid",
+                    client_reference_id=str(order.id),
+                    metadata={"product_id": product.id},
+                    amount_total=product.price,
+                    currency=product.currency.lower(),
+                    livemode=False,
+                    payment_intent="pi_test_123",
+                )
+            ),
+        ),
     )
 
     response = client.post(
@@ -543,11 +547,11 @@ async def test_webhook_marks_order_paid_and_fulfilled(
 
     assert updated_order is not None
     assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
+    assert updated_order.fulfillment_status == FulfillmentStatus.processing
     assert updated_order.stripe_payment_intent == "pi_test_123"
 
     assert updated_product is not None
-    assert updated_product.quantity == 9
+    assert updated_product.quantity == 10
 
 
 @pytest.mark.anyio
@@ -558,25 +562,27 @@ async def test_webhook_does_not_fulfill_on_amount_mismatch(
 ) -> None:
     product = await add_test_product(db_session)
     order = await add_test_order(db_session, product)
+    await db_session.rollback()
 
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
         "construct_event",
-        lambda payload, sig_header, secret: {
-            "type": "checkout.session.completed",
-            "data": {
-                "object": {
-                    "id": "cs_test_123",
-                    "payment_status": "paid",
-                    "client_reference_id": str(order.id),
-                    "metadata": {"product_id": product.id},
-                    "amount_total": 999999,
-                    "currency": product.currency.lower(),
-                    "livemode": False,
-                    "payment_intent": "pi_test_123",
-                }
-            },
-        },
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_test_amount_mismatch",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    id="cs_test_123",
+                    payment_status="paid",
+                    client_reference_id=str(order.id),
+                    metadata={"product_id": product.id},
+                    amount_total=999999,
+                    currency=product.currency.lower(),
+                    livemode=False,
+                    payment_intent="pi_test_123",
+                )
+            ),
+        ),
     )
 
     response = client.post(
