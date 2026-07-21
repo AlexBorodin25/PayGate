@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
 import stripe
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
+
 async def run_fulfillment(order_id: int) -> None:
     async with standalone_session() as db:
         claim_update = cast(
@@ -26,7 +28,7 @@ async def run_fulfillment(order_id: int) -> None:
                 .where(Order.id == order_id)
                 .where(Order.fulfillment_status == FulfillmentStatus.pending)
                 .values(fulfillment_status=FulfillmentStatus.processing)
-            )
+            ),
         )
 
         if claim_update.rowcount != 1:
@@ -35,12 +37,25 @@ async def run_fulfillment(order_id: int) -> None:
 
         logger.info("Fulfillment claimed.")
 
-        await db.execute(
-            update(Order)
-            .where(Order.id == order_id)
-            .where(Order.fulfillment_status == FulfillmentStatus.processing)
-            .values(fulfillment_status=FulfillmentStatus.fulfilled)
-        )
+        try:
+            await db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .where(Order.fulfillment_status == FulfillmentStatus.processing)
+                .values(
+                    fulfillment_status=FulfillmentStatus.fulfilled,
+                    fulfilled_at=datetime.now(UTC),
+                )
+            )
+        except Exception:
+            await db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .where(Order.fulfillment_status == FulfillmentStatus.processing)
+                .values(fulfillment_status=FulfillmentStatus.pending)
+            )
+            raise
+
 
 @router.post(
     "/webhooks/stripe",
