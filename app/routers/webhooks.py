@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
+
 async def deliver_product(order_id: int) -> None:
     logger.info("Delivered digital product for order_id.")
+
 
 async def run_fulfillment(order_id: int) -> None:
     async with standalone_session() as db:
