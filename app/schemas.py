@@ -8,7 +8,7 @@ class ProductResponse(BaseModel):
     currency: str
     display_price: str
     description: str
-    quantity_in_stock: int
+    quantity: int
 
     model_config = ConfigDict(from_attributes=True)
 

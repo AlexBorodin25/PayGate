@@ -1,12 +1,10 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Integer, String, Text, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import Boolean, DateTime, Enum, Integer, String, func
+from sqlalchemy.orm import Mapped, mapped_column
 
-
-class Base(DeclarativeBase):
-    pass
+from app.models.base import Base
 
 
 class OrderStatus(enum.StrEnum):
@@ -40,6 +38,7 @@ class Order(Base):
 
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    livemode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, name="order_status"),
@@ -63,16 +62,3 @@ class Order(Base):
         nullable=False,
         server_default=func.now(),
     )
-
-    livemode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-
-
-class Product(Base):
-    __tablename__ = "products"
-
-    id: Mapped[str] = mapped_column(String(50), primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    price: Mapped[int] = mapped_column(Integer, nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    quantity_in_stock: Mapped[int] = mapped_column(Integer, nullable=False)

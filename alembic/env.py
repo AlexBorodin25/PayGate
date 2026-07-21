@@ -27,6 +27,12 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def get_sync_database_url() -> str:
+    return settings.database_url.replace(
+        "postgresql+asyncpg://", "postgresql+psycopg://"
+    ).replace("ssl=require", "sslmode=require")
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -60,7 +66,7 @@ def run_migrations_online() -> None:
 
     """
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = settings.database_url
+    configuration["sqlalchemy.url"] = get_sync_database_url()
 
     connectable = engine_from_config(
         configuration,

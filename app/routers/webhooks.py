@@ -11,13 +11,24 @@ from app.config import settings
 from app.db import get_db
 from app.models import FulfillmentStatus, Order, OrderStatus, Product
 
-router = APIRouter()
+router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-@router.post("/webhooks/stripe")
+@router.post(
+    "/webhooks/stripe",
+    summary="Receive Stripe webhook events",
+    description=(
+        "Verifies the Stripe signature, processes paid checkout.session.completed "
+        "events, reconciles the Stripe session against the stored order, and updates "
+        "payment and fulfillment state."
+    ),
+    responses={
+        400: {"description": "Invalid, or unverifiable Stripe webhook payload"},
+    },
+)
 async def stripe_webhook(
     request: Request,
     db: DatabaseSession,
@@ -71,7 +82,7 @@ async def stripe_webhook(
             logger.warning("Stripe webhook referenced unknown order_id.")
             return {"received": True}
 
-        if order.status == OrderStatus.paid:
+        if order.status != OrderStatus.pending:
             return {"received": True}
 
         if order.stripe_session_id != session.get("id"):
@@ -95,8 +106,8 @@ async def stripe_webhook(
             await db.execute(
                 update(Product)
                 .where(Product.id == product_id)
-                .where(Product.quantity_in_stock > 0)
-                .values(quantity_in_stock=Product.quantity_in_stock - 1)
+                .where(Product.quantity > 0)
+                .values(quantity=Product.quantity - 1)
             ),
         )
 

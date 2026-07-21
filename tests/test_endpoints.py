@@ -17,9 +17,10 @@ os.environ.setdefault("ORDERS_API_KEY", "test")
 
 from app.db import get_db
 from app.main import app
-from app.models import Base, Order, OrderStatus, Product
+from app.models import Base, FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
 from app.routers import products as products_router
+from app.routers import webhooks as webhooks_router
 
 
 @pytest.fixture
@@ -71,7 +72,8 @@ async def add_test_product(db_session: AsyncSession) -> Product:
         price=4999,
         currency="USD",
         description="A waterproof Bluetooth speaker.",
-        quantity_in_stock=10,
+        quantity=10,
+        is_deleted=False,
     )
     db_session.add(product)
     await db_session.commit()
@@ -98,7 +100,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 price=4999,
                 currency="USD",
                 description="A waterproof Bluetooth speaker.",
-                quantity_in_stock=10,
+                quantity=10,
             ),
             SimpleNamespace(
                 id="laptop",
@@ -106,7 +108,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 price=29999,
                 currency="USD",
                 description="A business laptop.",
-                quantity_in_stock=5,
+                quantity=5,
             ),
             SimpleNamespace(
                 id="camera",
@@ -114,7 +116,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
                 price=34999,
                 currency="USD",
                 description="A 33MP full-frame mirrorless camera.",
-                quantity_in_stock=3,
+                quantity=3,
             ),
         ]
 
@@ -135,7 +137,7 @@ def test_products_endpoint(monkeypatch: Any) -> None:
     assert products[0]["price"] == 4999
     assert products[0]["currency"] == "USD"
     assert products[0]["description"] == "A waterproof Bluetooth speaker."
-    assert products[0]["quantity_in_stock"] == 10
+    assert products[0]["quantity"] == 10
     assert products[0]["display_price"] == "49.99 USD"
 
 
@@ -272,7 +274,8 @@ async def test_checkout_out_of_stock(
         price=4999,
         currency="USD",
         description="A waterproof Bluetooth speaker.",
-        quantity_in_stock=0,
+        quantity=0,
+        is_deleted=False,
     )
     db_session.add(product)
     await db_session.commit()
@@ -353,3 +356,243 @@ async def test_cancel_page_does_not_mutate(
 
     orders = (await db_session.execute(select(Order))).scalars().all()
     assert len(orders) == 0
+
+
+@pytest.mark.anyio
+async def test_deleted_products_in_products(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
+    active_product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity=10,
+        is_deleted=False,
+    )
+    deleted_product = Product(
+        id="deleted-speaker",
+        name="Deleted Speaker",
+        price=4999,
+        currency="USD",
+        description="This product should not show.",
+        quantity=10,
+        is_deleted=True,
+    )
+
+    db_session.add_all([active_product, deleted_product])
+    await db_session.commit()
+
+    response = client.get("/products")
+
+    assert response.status_code == 200
+
+    products = response.json()
+    product_ids = {product["id"] for product in products}
+
+    assert "speaker" in product_ids
+    assert "deleted-speaker" not in product_ids
+
+
+@pytest.mark.anyio
+async def test_deleted_product_cannot_be_checked_out(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
+    deleted_product = Product(
+        id="deleted-speaker",
+        name="Deleted Speaker",
+        price=4999,
+        currency="USD",
+        description="This product should not be purchasable.",
+        quantity=10,
+        is_deleted=True,
+    )
+
+    db_session.add(deleted_product)
+    await db_session.commit()
+
+    response = client.post(
+        "/checkout",
+        json={"product_id": "deleted-speaker"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Product not found"
+
+
+@pytest.mark.anyio
+async def test_webhook_missing_signature(client: TestClient) -> None:
+    response = client.post("/webhooks/stripe", content=b"{}")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stripe signature is required"
+
+
+@pytest.mark.anyio
+async def test_webhook_ignores_other_event_types(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "customer.created",
+            "data": {"object": {}},
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+
+
+@pytest.mark.anyio
+async def test_webhook_ignores_unpaid_checkout(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "payment_status": "unpaid",
+                }
+            },
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+
+
+async def add_test_order(
+    db_session: AsyncSession,
+    product: Product,
+) -> Order:
+    order = Order(
+        stripe_session_id="cs_test_123",
+        amount=product.price,
+        currency=product.currency,
+        livemode=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    return order
+
+
+@pytest.mark.anyio
+async def test_webhook_marks_order_paid_and_fulfilled(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "payment_status": "paid",
+                    "client_reference_id": str(order.id),
+                    "metadata": {"product_id": product.id},
+                    "amount_total": product.price,
+                    "currency": product.currency.lower(),
+                    "livemode": False,
+                    "payment_intent": "pi_test_123",
+                }
+            },
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+
+    updated_order = await db_session.get(Order, order.id)
+    updated_product = await db_session.get(Product, product.id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.paid
+    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
+    assert updated_order.stripe_payment_intent == "pi_test_123"
+
+    assert updated_product is not None
+    assert updated_product.quantity == 9
+
+
+@pytest.mark.anyio
+async def test_webhook_does_not_fulfill_on_amount_mismatch(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "payment_status": "paid",
+                    "client_reference_id": str(order.id),
+                    "metadata": {"product_id": product.id},
+                    "amount_total": 999999,
+                    "currency": product.currency.lower(),
+                    "livemode": False,
+                    "payment_intent": "pi_test_123",
+                }
+            },
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+
+    updated_order = await db_session.get(Order, order.id)
+    updated_product = await db_session.get(Product, product.id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.pending
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
+
+    assert updated_product is not None
+    assert updated_product.quantity == 10

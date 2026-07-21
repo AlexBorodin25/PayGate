@@ -1,31 +1,58 @@
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.db import get_db
-from app.models import Order, OrderStatus
+from app.models import Order, OrderStatus, Product
 from app.schemas import CheckoutRequest, CheckoutResponse
 from app.services.products import get_product
 
-router = APIRouter()
+router = APIRouter(tags=["Checkout"])
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 stripe.api_key = settings.stripe_secret_key
 
 
-@router.post("/checkout", response_model=CheckoutResponse)
+@router.post(
+    "/checkout",
+    response_model=CheckoutResponse,
+    summary="Create a Stripe Checkout Session",
+    description=(
+        "Creates a pending order and Stripe Checkout Session for a product. "
+        "The client sends only a product id. Price and currency are resolved "
+        "server-side."
+    ),
+    responses={
+        404: {"description": "Product not found"},
+        409: {"description": "Product is out of stock"},
+        502: {"description": "Stripe checkout session could not be created"},
+        503: {"description": "Stripe checkout status is unavailable"},
+    },
+)
 async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
     product = await get_product(db, request.product_id)
 
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    if product.quantity_in_stock <= 0:
+    stock_update = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(Product)
+            .where(Product.id == product.id)
+            .where(Product.quantity > 0)
+            .values(quantity=Product.quantity - 1)
+        ),
+    )
+
+    if stock_update.rowcount != 1:
         raise HTTPException(status_code=409, detail="Product is out of stock")
 
     order = Order(
@@ -72,6 +99,11 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
 
     except stripe.StripeError as error:
         order.status = OrderStatus.checkout_failed
+        await db.execute(
+            update(Product)
+            .where(Product.id == product.id)
+            .values(quantity=Product.quantity + 1)
+        )
         await db.commit()
         raise HTTPException(
             status_code=502,
@@ -80,6 +112,11 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
 
     if session.url is None:
         order.status = OrderStatus.checkout_failed
+        await db.execute(
+            update(Product)
+            .where(Product.id == product.id)
+            .values(quantity=Product.quantity + 1)
+        )
         await db.commit()
         raise HTTPException(
             status_code=502,
@@ -96,7 +133,14 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
     )
 
 
-@router.get("/success")
+@router.get(
+    "/success",
+    summary="Checkout success landing endpoint",
+    description=(
+        "Landing endpoint after Stripe redirects the user back. "
+        "Does not verify payment or mutate order state."
+    ),
+)
 async def success() -> dict[str, str]:
     return {
         "status": "pending_confirmation",
@@ -104,6 +148,11 @@ async def success() -> dict[str, str]:
     }
 
 
-@router.get("/cancel")
+@router.get(
+    "/cancel",
+    summary="Checkout cancellation landing endpoint",
+    description="Landing endpoint after checkout is cancelled. "
+    "Does not mutate order state.",
+)
 async def cancel() -> dict[str, str]:
     return {"status": "cancelled", "message": "Checkout cancelled."}
