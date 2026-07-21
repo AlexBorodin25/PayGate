@@ -1,9 +1,10 @@
 import logging
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,10 +63,10 @@ async def stripe_webhook(
         logger.warning("Stripe webhook missing event id.")
         return {"received": True}
 
-    if event["type"] != "checkout.session.completed":
+    if event.get("type") != "checkout.session.completed":
         return {"received": True}
 
-    session = event["data"]["object"]
+    session = event.get("data", {}).get("object", {})
 
     if session.get("payment_status") != "paid":
         return {"received": True}
@@ -80,8 +81,11 @@ async def stripe_webhook(
     try:
         parsed_order_id = int(order_id)
     except ValueError:
-        logger.warning("Stripe webhook had malformed order_id.")
+        logger.warning("Stripe webhook had malformed order_id")
         return {"received": True}
+
+    payment_intent = session.get("payment_intent")
+    won_paid_transition = False
 
     try:
         async with db.begin():
@@ -96,12 +100,8 @@ async def stripe_webhook(
 
             if order is None:
                 logger.warning(
-                    "Stripe webhook referenced unknown order_id.",
-                    parsed_order_id,
+                    "Stripe webhook referenced unknown order_id",
                 )
-                return {"received": True}
-
-            if order.status != OrderStatus.pending:
                 return {"received": True}
 
             if order.stripe_session_id != session.get("id"):
@@ -120,9 +120,21 @@ async def stripe_webhook(
                 logger.warning("Stripe livemode mismatch for order_id.")
                 return {"received": True}
 
-            order.status = OrderStatus.paid
-            order.stripe_payment_intent = session.get("payment_intent")
-            order.fulfillment_status = FulfillmentStatus.fulfilled
+            paid_update = cast(
+                CursorResult[Any],
+                await db.execute(
+                    update(Order)
+                    .where(Order.id == parsed_order_id)
+                    .where(Order.status == OrderStatus.pending)
+                    .values(
+                        status=OrderStatus.paid,
+                        stripe_payment_intent=payment_intent,
+                        fulfillment_status=FulfillmentStatus.processing,
+                    )
+                ),
+            )
+
+            won_paid_transition = paid_update.rowcount == 1
 
     except IntegrityError:
         logger.info("Duplicate Stripe webhook event ignored")
@@ -133,5 +145,11 @@ async def stripe_webhook(
             status_code=500,
             detail="Temporary database error.",
         ) from error
+
+    if won_paid_transition:
+        logger.info(
+            "Order %s paid; fulfillment can be scheduled.",
+            parsed_order_id,
+        )
 
     return {"received": True}
