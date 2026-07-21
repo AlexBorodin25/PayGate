@@ -1,15 +1,14 @@
 import logging
-from typing import Annotated, Any, cast
+from typing import Annotated
 
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from sqlalchemy import select, update
-from sqlalchemy.engine import CursorResult
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
-from app.models import FulfillmentStatus, Order, OrderStatus, Product
+from app.models import FulfillmentStatus, Order, OrderStatus
 
 router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
@@ -101,28 +100,8 @@ async def stripe_webhook(
             logger.warning("Stripe livemode mismatch for order_id.")
             return {"received": True}
 
-        stock_update = cast(
-            CursorResult[Any],
-            await db.execute(
-                update(Product)
-                .where(Product.id == product_id)
-                .where(Product.quantity > 0)
-                .values(quantity=Product.quantity - 1)
-            ),
-        )
-
         order.status = OrderStatus.paid
         order.stripe_payment_intent = session.get("payment_intent")
-
-        if stock_update.rowcount != 1:
-            order.fulfillment_status = FulfillmentStatus.pending
-            logger.error(
-                "Paid order_id=%s could not be fulfilled: product_id=%s out of stock",
-                order.id,
-                product_id,
-            )
-            return {"received": True}
-
         order.fulfillment_status = FulfillmentStatus.fulfilled
 
     return {"received": True}

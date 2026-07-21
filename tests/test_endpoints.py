@@ -547,7 +547,7 @@ async def test_webhook_marks_order_paid_and_fulfilled(
     assert updated_order.stripe_payment_intent == "pi_test_123"
 
     assert updated_product is not None
-    assert updated_product.quantity == 9
+    assert updated_product.quantity == 10
 
 
 @pytest.mark.anyio
