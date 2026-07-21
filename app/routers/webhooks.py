@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db import get_db
+from app.db import get_db, standalone_session
 from app.models import FulfillmentStatus, Order, OrderStatus, ProcessedWebhookEvent
 
 router = APIRouter(tags=["Stripe Webhooks"])
@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
-def run_fulfillment(order_id: int) -> None:
-    logger.info("Fulfillment queued for order_id")
+async def run_fulfillment(order_id: int) -> None:
+    async with standalone_session() as db:
+        logger.info("Fulfillment queued for order_id")
 
 @router.post(
     "/webhooks/stripe",
