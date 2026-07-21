@@ -151,7 +151,8 @@ async def success() -> dict[str, str]:
 @router.get(
     "/cancel",
     summary="Checkout cancellation landing endpoint",
-    description="Landing endpoint after checkout is cancelled. Does not mutate order state.",
+    description="Landing endpoint after checkout is cancelled. "
+    "Does not mutate order state.",
 )
 async def cancel() -> dict[str, str]:
     return {"status": "cancelled", "message": "Checkout cancelled."}

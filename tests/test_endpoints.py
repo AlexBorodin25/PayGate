@@ -17,9 +17,10 @@ os.environ.setdefault("ORDERS_API_KEY", "test")
 
 from app.db import get_db
 from app.main import app
-from app.models import Base, Order, OrderStatus, Product
+from app.models import Base, FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
 from app.routers import products as products_router
+from app.routers import webhooks as webhooks_router
 
 
 @pytest.fixture
@@ -420,3 +421,178 @@ async def test_deleted_product_cannot_be_checked_out(
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Product not found"
+
+
+@pytest.mark.anyio
+async def test_webhook_missing_signature(client: TestClient) -> None:
+    response = client.post("/webhooks/stripe", content=b"{}")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stripe signature is required"
+
+
+@pytest.mark.anyio
+async def test_webhook_ignores_other_event_types(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "customer.created",
+            "data": {"object": {}},
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+
+
+@pytest.mark.anyio
+async def test_webhook_ignores_unpaid_checkout(
+    client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "payment_status": "unpaid",
+                }
+            },
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+
+
+async def add_test_order(
+    db_session: AsyncSession,
+    product: Product,
+) -> Order:
+    order = Order(
+        stripe_session_id="cs_test_123",
+        amount=product.price,
+        currency=product.currency,
+        livemode=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    return order
+
+
+@pytest.mark.anyio
+async def test_webhook_marks_order_paid_and_fulfilled(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "payment_status": "paid",
+                    "client_reference_id": str(order.id),
+                    "metadata": {"product_id": product.id},
+                    "amount_total": product.price,
+                    "currency": product.currency.lower(),
+                    "livemode": False,
+                    "payment_intent": "pi_test_123",
+                }
+            },
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+
+    updated_order = await db_session.get(Order, order.id)
+    updated_product = await db_session.get(Product, product.id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.paid
+    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
+    assert updated_order.stripe_payment_intent == "pi_test_123"
+
+    assert updated_product is not None
+    assert updated_product.quantity == 9
+
+
+@pytest.mark.anyio
+async def test_webhook_does_not_fulfill_on_amount_mismatch(
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: {
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "payment_status": "paid",
+                    "client_reference_id": str(order.id),
+                    "metadata": {"product_id": product.id},
+                    "amount_total": 999999,
+                    "currency": product.currency.lower(),
+                    "livemode": False,
+                    "payment_intent": "pi_test_123",
+                }
+            },
+        },
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+
+    updated_order = await db_session.get(Order, order.id)
+    updated_product = await db_session.get(Product, product.id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.pending
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
+
+    assert updated_product is not None
+    assert updated_product.quantity == 10

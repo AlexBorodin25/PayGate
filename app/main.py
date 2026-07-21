@@ -7,9 +7,7 @@ from app.routers.webhooks import router as webhooks_router
 
 app = FastAPI(
     title="PayGate",
-    description=(
-        "A Stripe Checkout payment service for digital products."
-    )
+    description=("A Stripe Checkout payment service for digital products."),
 )
 
 app.state.settings = settings
