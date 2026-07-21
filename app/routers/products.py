@@ -7,12 +7,16 @@ from app.db import get_db
 from app.schemas import ProductResponse
 from app.services.products import format_price, list_products
 
-router = APIRouter()
+router = APIRouter(tags=["Products"])
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-@router.get("/products", response_model=list[ProductResponse])
+@router.get(
+    "/products",
+    summary="List available products",
+    description="Returns products that are not soft-deleted.",
+)
 async def get_products(db: DatabaseSession) -> list[ProductResponse]:
     products = await list_products(db)
 

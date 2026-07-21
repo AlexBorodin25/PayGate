@@ -11,13 +11,24 @@ from app.config import settings
 from app.db import get_db
 from app.models import FulfillmentStatus, Order, OrderStatus, Product
 
-router = APIRouter()
+router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-@router.post("/webhooks/stripe")
+@router.post(
+    "/webhooks/stripe",
+    summary="Receive Stripe webhook events",
+    description=(
+        "Verifies the Stripe signature, processes paid checkout.session.completed "
+        "events, reconciles the Stripe session against the stored order, and updates "
+        "payment and fulfillment state."
+    ),
+    responses={
+        400: {"description": "Invalid, or unverifiable Stripe webhook payload"},
+    },
+)
 async def stripe_webhook(
     request: Request,
     db: DatabaseSession,

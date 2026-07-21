@@ -13,14 +13,29 @@ from app.models import Order, OrderStatus, Product
 from app.schemas import CheckoutRequest, CheckoutResponse
 from app.services.products import get_product
 
-router = APIRouter()
+router = APIRouter(tags=["Checkout"])
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 stripe.api_key = settings.stripe_secret_key
 
 
-@router.post("/checkout", response_model=CheckoutResponse)
+@router.post(
+    "/checkout",
+    response_model=CheckoutResponse,
+    summary="Create a Stripe Checkout Session",
+    description=(
+        "Creates a pending order and Stripe Checkout Session for a product. "
+        "The client sends only a product id. Price and currency are resolved "
+        "server-side."
+    ),
+    responses={
+        404: {"description": "Product not found"},
+        409: {"description": "Product is out of stock"},
+        502: {"description": "Stripe checkout session could not be created"},
+        503: {"description": "Stripe checkout status is unavailable"},
+    },
+)
 async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
     product = await get_product(db, request.product_id)
 
@@ -118,7 +133,14 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
     )
 
 
-@router.get("/success")
+@router.get(
+    "/success",
+    summary="Checkout success landing endpoint",
+    description=(
+        "Landing endpoint after Stripe redirects the user back. "
+        "Does not verify payment or mutate order state."
+    ),
+)
 async def success() -> dict[str, str]:
     return {
         "status": "pending_confirmation",
@@ -126,6 +148,10 @@ async def success() -> dict[str, str]:
     }
 
 
-@router.get("/cancel")
+@router.get(
+    "/cancel",
+    summary="Checkout cancellation landing endpoint",
+    description="Landing endpoint after checkout is cancelled. Does not mutate order state.",
+)
 async def cancel() -> dict[str, str]:
     return {"status": "cancelled", "message": "Checkout cancelled."}
