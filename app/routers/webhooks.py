@@ -58,21 +58,23 @@ async def stripe_webhook(
             detail="Invalid Stripe signature.",
         ) from error
 
-    event_id = event.get("id")
+    event_id = event.id
     if event_id is None:
         logger.warning("Stripe webhook missing event id.")
         return {"received": True}
 
-    if event.get("type") != "checkout.session.completed":
+    if event.type != "checkout.session.completed":
         return {"received": True}
 
-    session = event.get("data", {}).get("object", {})
+    session = event.data.object
 
-    if session.get("payment_status") != "paid":
+    if session.payment_status != "paid":
         return {"received": True}
 
-    order_id = session.get("client_reference_id")
-    product_id = session.get("metadata", {}).get("product_id")
+    order_id = session.client_reference_id
+
+    metadata = session.metadata or {}
+    product_id = metadata["product_id"] if "product_id" in metadata else None
 
     if order_id is None or product_id is None:
         logger.warning("Stripe webhook missing checkout metadata.")
@@ -81,10 +83,10 @@ async def stripe_webhook(
     try:
         parsed_order_id = int(order_id)
     except ValueError:
-        logger.warning("Stripe webhook had malformed order_id")
+        logger.warning("Stripe webhook had malformed order_id", order_id)
         return {"received": True}
 
-    payment_intent = session.get("payment_intent")
+    payment_intent = session.payment_intent
     won_paid_transition = False
 
     try:
@@ -94,29 +96,32 @@ async def stripe_webhook(
 
             order = (
                 await db.execute(
-                    select(Order).where(Order.id == parsed_order_id).with_for_update()
+                    select(Order)
+                    .where(Order.id == parsed_order_id)
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
 
             if order is None:
                 logger.warning(
-                    "Stripe webhook referenced unknown order_id",
+                    "Stripe webhook referenced unknown order_id.",
+                    parsed_order_id,
                 )
                 return {"received": True}
 
-            if order.stripe_session_id != session.get("id"):
+            if order.stripe_session_id != session.id:
                 logger.warning("Stripe session does not match order_id.")
                 return {"received": True}
 
-            if order.amount != session.get("amount_total"):
+            if order.amount != session.amount_total:
                 logger.warning("Stripe amount mismatch for order_id.")
                 return {"received": True}
 
-            if order.currency.lower() != session.get("currency"):
+            if order.currency.lower() != session.currency:
                 logger.warning("Stripe currency mismatch for order_id.")
                 return {"received": True}
 
-            if order.livemode != session.get("livemode"):
+            if order.livemode != session.livemode:
                 logger.warning("Stripe livemode mismatch for order_id.")
                 return {"received": True}
 
@@ -148,7 +153,7 @@ async def stripe_webhook(
 
     if won_paid_transition:
         logger.info(
-            "Order %s paid; fulfillment can be scheduled.",
+            "Order paid; fulfillment can be scheduled.",
             parsed_order_id,
         )
 
