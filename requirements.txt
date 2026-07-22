@@ -8,3 +8,6 @@ alembic==1.18.5
 stripe==15.3.1
 asyncpg==0.31.0
 psycopg[binary]==3.3.4
+jinja2==3.1.6
+python-multipart==0.0.32
+gunicorn==26.0.0

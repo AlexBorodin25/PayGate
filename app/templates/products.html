@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PayGate</title>
+</head>
+<body>
+    <h1>Products</h1>
+
+    {% for product in products %}
+        <div>
+            <h2>{{ product.name }}</h2>
+            <p>{{ product.description }}</p>
+            <p>{{ product.display_price }}</p>
+            <p>Stock: {{ product.quantity }}</p>
+
+            <form method="post" action="/checkout-form">
+                <input type="hidden" name="product_id" value="{{ product.id }}">
+                <button type="submit">Checkout</button>
+            </form>
+        </div>
+    {% endfor %}
+</body>
+</html>
