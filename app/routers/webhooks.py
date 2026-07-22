@@ -12,14 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_db, standalone_session
 from app.models import FulfillmentStatus, Order, OrderStatus, ProcessedWebhookEvent
+from app.services.fulfillment import fulfillment_service
 
 router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
-
-
-from app.services.fulfillment import fulfillment_service
 
 
 async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None:
@@ -37,7 +35,8 @@ async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None
 
             if claim_update.rowcount != 1:
                 logger.info(
-                    "Fulfillment already claimed for order_id=%s session_id=%s event_id=%s",
+                    "Fulfillment already claimed for order_id=%s "
+                    "session_id=%s event_id=%s",
                     order_id,
                     session_id,
                     event_id,
@@ -205,6 +204,11 @@ async def stripe_webhook(
         ) from error
 
     if won_paid_transition:
-        background_tasks.add_task(run_fulfillment, parsed_order_id)
+        background_tasks.add_task(
+            run_fulfillment,
+            parsed_order_id,
+            session.id,
+            event_id,
+        )
 
     return {"received": True}
