@@ -1,5 +1,6 @@
 import os
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,7 +25,7 @@ from app.routers import webhooks as webhooks_router
 
 
 @pytest.fixture
-async def db_session() -> AsyncIterator[AsyncSession]:
+async def test_sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         connect_args={"check_same_thread": False},
@@ -39,13 +40,20 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async with TestSession() as db:
-        yield db
+    yield TestSession
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
 
     await engine.dispose()
+
+
+@pytest.fixture
+async def db_session(
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    async with test_sessionmaker() as db:
+        yield db
 
 
 @pytest.fixture
@@ -78,6 +86,23 @@ async def add_test_product(db_session: AsyncSession) -> Product:
     db_session.add(product)
     await db_session.commit()
     return product
+
+
+async def add_test_order(
+    db_session: AsyncSession,
+    product: Product,
+) -> Order:
+    order = Order(
+        stripe_session_id="cs_test_123",
+        amount=product.price,
+        currency=product.currency,
+        livemode=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    return order
 
 
 def test_health_endpoint() -> None:
@@ -143,7 +168,9 @@ def test_products_endpoint(monkeypatch: Any) -> None:
 
 @pytest.mark.anyio
 async def test_checkout_success(
-    client: TestClient, db_session: AsyncSession, monkeypatch: Any
+    client: TestClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
 ) -> None:
     await add_test_product(db_session)
 
@@ -485,33 +512,42 @@ async def test_webhook_ignores_unpaid_checkout(
     assert response.json() == {"received": True}
 
 
-async def add_test_order(
-    db_session: AsyncSession,
-    product: Product,
-) -> Order:
-    order = Order(
-        stripe_session_id="cs_test_123",
-        amount=product.price,
-        currency=product.currency,
-        livemode=False,
-    )
-
-    db_session.add(order)
-    await db_session.commit()
-
-    return order
-
-
 @pytest.mark.anyio
-async def test_webhook_marks_order_paid_and_processing(
+async def test_webhook_marks_order_paid_and_fulfilled(
     client: TestClient,
     db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: Any,
 ) -> None:
     product = await add_test_product(db_session)
     order = await add_test_order(db_session, product)
     await db_session.rollback()
 
+    delivered_orders = []
+
+    async def fake_deliver_product(order_id: int) -> None:
+        delivered_orders.append(order_id)
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        webhooks_router,
+        "deliver_product",
+        fake_deliver_product,
+    )
+    monkeypatch.setattr(
+        webhooks_router,
+        "standalone_session",
+        fake_standalone_session,
+    )
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
         "construct_event",
@@ -542,16 +578,24 @@ async def test_webhook_marks_order_paid_and_processing(
     assert response.status_code == 200
     assert response.json() == {"received": True}
 
-    updated_order = await db_session.get(Order, order.id)
-    updated_product = await db_session.get(Product, product.id)
+    order_id = order.id
+    product_id = product.id
+
+    db_session.expire_all()
+
+    updated_order = await db_session.get(Order, order_id)
+    updated_product = await db_session.get(Product, product_id)
 
     assert updated_order is not None
     assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.processing
+    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
+    assert updated_order.fulfilled_at is not None
     assert updated_order.stripe_payment_intent == "pi_test_123"
 
     assert updated_product is not None
     assert updated_product.quantity == 10
+
+    assert delivered_orders == [order_id]
 
 
 @pytest.mark.anyio
@@ -599,6 +643,7 @@ async def test_webhook_does_not_fulfill_on_amount_mismatch(
     assert updated_order is not None
     assert updated_order.status == OrderStatus.pending
     assert updated_order.fulfillment_status == FulfillmentStatus.pending
+    assert updated_order.fulfilled_at is None
 
     assert updated_product is not None
     assert updated_product.quantity == 10

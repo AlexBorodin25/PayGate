@@ -1,21 +1,57 @@
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
 import stripe
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db import get_db
+from app.db import get_db, standalone_session
 from app.models import FulfillmentStatus, Order, OrderStatus, ProcessedWebhookEvent
 
 router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+async def deliver_product(order_id: int) -> None:
+    logger.info("Delivered digital product for order_id.")
+
+
+async def run_fulfillment(order_id: int) -> None:
+    async with standalone_session() as db:
+        claim_update = cast(
+            CursorResult[Any],
+            await db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .where(Order.fulfillment_status == FulfillmentStatus.pending)
+                .values(fulfillment_status=FulfillmentStatus.processing)
+            ),
+        )
+
+        if claim_update.rowcount != 1:
+            logger.info("Fulfillment already claimed.")
+            return
+
+        logger.info("Fulfillment claimed.")
+
+        await deliver_product(order_id)
+
+        await db.execute(
+            update(Order)
+            .where(Order.id == order_id)
+            .where(Order.fulfillment_status == FulfillmentStatus.processing)
+            .values(
+                fulfillment_status=FulfillmentStatus.fulfilled,
+                fulfilled_at=datetime.now(UTC),
+            )
+        )
 
 
 @router.post(
@@ -34,6 +70,7 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 async def stripe_webhook(
     request: Request,
     db: DatabaseSession,
+    background_tasks: BackgroundTasks,
     sig_header: str | None = Header(default=None, alias="Stripe-Signature"),
 ) -> dict[str, bool]:
     if sig_header is None:
@@ -132,7 +169,7 @@ async def stripe_webhook(
                     .values(
                         status=OrderStatus.paid,
                         stripe_payment_intent=payment_intent,
-                        fulfillment_status=FulfillmentStatus.processing,
+                        fulfillment_status=FulfillmentStatus.pending,
                     )
                 ),
             )
@@ -150,9 +187,6 @@ async def stripe_webhook(
         ) from error
 
     if won_paid_transition:
-        logger.info(
-            "Order paid; fulfillment can be scheduled.",
-            parsed_order_id,
-        )
+        background_tasks.add_task(run_fulfillment, parsed_order_id)
 
     return {"received": True}
