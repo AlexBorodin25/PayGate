@@ -19,8 +19,7 @@ logger = logging.getLogger(__name__)
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-async def deliver_product(order_id: int) -> None:
-    logger.info("Delivered digital product for order_id=%s", order_id)
+from app.services.fulfillment import fulfillment_service
 
 
 async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None:
@@ -52,7 +51,7 @@ async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None
                 event_id,
             )
 
-            await deliver_product(order_id)
+            await fulfillment_service.deliver_product(order_id)
 
             await db.execute(
                 update(Order)
