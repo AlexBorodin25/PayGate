@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_db, standalone_session
 from app.models import FulfillmentStatus, Order, OrderStatus, ProcessedWebhookEvent
+from app.services.fulfillment import fulfillment_service
 
 router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
@@ -19,38 +20,54 @@ logger = logging.getLogger(__name__)
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-async def deliver_product(order_id: int) -> None:
-    logger.info("Delivered digital product for order_id.")
+async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None:
+    try:
+        async with standalone_session() as db:
+            claim_update = cast(
+                CursorResult[Any],
+                await db.execute(
+                    update(Order)
+                    .where(Order.id == order_id)
+                    .where(Order.fulfillment_status == FulfillmentStatus.pending)
+                    .values(fulfillment_status=FulfillmentStatus.processing)
+                ),
+            )
 
+            if claim_update.rowcount != 1:
+                logger.info(
+                    "Fulfillment already claimed for order_id=%s "
+                    "session_id=%s event_id=%s",
+                    order_id,
+                    session_id,
+                    event_id,
+                )
+                return
 
-async def run_fulfillment(order_id: int) -> None:
-    async with standalone_session() as db:
-        claim_update = cast(
-            CursorResult[Any],
+            logger.info(
+                "Fulfillment claimed for order_id=%s session_id=%s event_id=%s",
+                order_id,
+                session_id,
+                event_id,
+            )
+
+            await fulfillment_service.deliver_product(order_id)
+
             await db.execute(
                 update(Order)
                 .where(Order.id == order_id)
-                .where(Order.fulfillment_status == FulfillmentStatus.pending)
-                .values(fulfillment_status=FulfillmentStatus.processing)
-            ),
-        )
-
-        if claim_update.rowcount != 1:
-            logger.info("Fulfillment already claimed.")
-            return
-
-        logger.info("Fulfillment claimed.")
-
-        await deliver_product(order_id)
-
-        await db.execute(
-            update(Order)
-            .where(Order.id == order_id)
-            .where(Order.fulfillment_status == FulfillmentStatus.processing)
-            .values(
-                fulfillment_status=FulfillmentStatus.fulfilled,
-                fulfilled_at=datetime.now(UTC),
+                .where(Order.fulfillment_status == FulfillmentStatus.processing)
+                .values(
+                    fulfillment_status=FulfillmentStatus.fulfilled,
+                    fulfilled_at=datetime.now(UTC),
+                )
             )
+
+    except Exception:
+        logger.exception(
+            "Fulfillment failed for order_id=%s session_id=%s event_id=%s",
+            order_id,
+            session_id,
+            event_id,
         )
 
 
@@ -187,6 +204,11 @@ async def stripe_webhook(
         ) from error
 
     if won_paid_transition:
-        background_tasks.add_task(run_fulfillment, parsed_order_id)
+        background_tasks.add_task(
+            run_fulfillment,
+            parsed_order_id,
+            session.id,
+            event_id,
+        )
 
     return {"received": True}

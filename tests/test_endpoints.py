@@ -539,7 +539,7 @@ async def test_webhook_marks_order_paid_and_fulfilled(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router,
+        webhooks_router.fulfillment_service,
         "deliver_product",
         fake_deliver_product,
     )
@@ -647,3 +647,77 @@ async def test_webhook_does_not_fulfill_on_amount_mismatch(
 
     assert updated_product is not None
     assert updated_product.quantity == 10
+
+
+@pytest.mark.anyio
+async def test_fulfillment_failure_leaves_order_pending(
+    client: TestClient,
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order_id = order.id
+    product_id = product.id
+    await db_session.rollback()
+
+    async def fail_delivery(order_id: int) -> None:
+        raise RuntimeError("delivery failed")
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        webhooks_router.fulfillment_service,
+        "deliver_product",
+        fail_delivery,
+    )
+    monkeypatch.setattr(
+        webhooks_router,
+        "standalone_session",
+        fake_standalone_session,
+    )
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_test_delivery_fails",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    id="cs_test_123",
+                    payment_status="paid",
+                    client_reference_id=str(order_id),
+                    metadata={"product_id": product_id},
+                    amount_total=product.price,
+                    currency=product.currency.lower(),
+                    livemode=False,
+                    payment_intent="pi_test_123",
+                )
+            ),
+        ),
+    )
+
+    response = client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+
+    db_session.expire_all()
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.paid
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
+    assert updated_order.fulfilled_at is None
