@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Request, Response
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,10 +37,10 @@ async def product_page(request: Request, db: DatabaseSession):
         },
     )
 
+
 @router.post("/checkout-form")
 async def checkout_form(
-        product_id: Annotated[str, Form()],
-        db: DatabaseSession
+    product_id: Annotated[str, Form()], db: DatabaseSession
 ) -> RedirectResponse:
     response = await checkout(CheckoutRequest(product_id=product_id), db)
     return RedirectResponse(response.checkout_url, status_code=303)
