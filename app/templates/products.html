@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/html">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PayGate</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+    <div class="header-inner">
+        <h1 class="logo">PayGate</h1>
+        <nav class="nav-space" aria-label="Navigation to be added"></nav>
+    </div>
+</header>
+
+<main>
+    <h2 class="page-title">Products</h2>
+
+    <section class="product-grid">
+        {% for product in products %}
+            <article class="product-card">
+                <h2>{{ product.name }}</h2>
+                <p class="description">{{ product.description }}</p>
+                <p class="price">{{ product.display_price }}</p>
+                <p class="stock">Stock: {{ product.quantity }}</p>
+
+                <form method="post" action="/checkout-form">
+                    <input type="hidden" name="product_id" value="{{ product.id }}">
+                    <button type="submit" {% if product.quantity <= 0 %}disabled{% endif %}>
+                        Buy now
+                    </button>
+                </form>
+            </article>
+        {% endfor %}
+    </section>
+</main>
+
+<footer class ="site-footer">
+    <div class="footer-inner">
+        PayGate checkout demo. Use card number 4242 4242 4242 4242 at checkout.
+    </div>
+</footer>
+</body>
+</html>
