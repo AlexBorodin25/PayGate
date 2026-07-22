@@ -35,3 +35,8 @@ $response
 Start-Process $response.checkout_url
 
 Use card 4242 4242 4242 4242.
+
+To view /orders use:
+Invoke-RestMethod `
+  -Uri "https://your-app.onrender.com/orders" `
+  -Headers @{ "X-API-Key" = "your-secret-key" }
