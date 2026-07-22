@@ -20,37 +20,56 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 async def deliver_product(order_id: int) -> None:
-    logger.info("Delivered digital product for order_id.")
+    logger.info("Delivered digital product for order_id=%s", order_id)
 
 
-async def run_fulfillment(order_id: int) -> None:
-    async with standalone_session() as db:
-        claim_update = cast(
-            CursorResult[Any],
+async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None:
+    try:
+        async with standalone_session() as db:
+            claim_update = cast(
+                CursorResult[Any],
+                await db.execute(
+                    update(Order)
+                    .where(Order.id == order_id)
+                    .where(Order.fulfillment_status == FulfillmentStatus.pending)
+                    .values(fulfillment_status=FulfillmentStatus.processing)
+                ),
+            )
+
+            if claim_update.rowcount != 1:
+                logger.info(
+                    "Fulfillment already claimed for order_id=%s session_id=%s event_id=%s",
+                    order_id,
+                    session_id,
+                    event_id,
+                )
+                return
+
+            logger.info(
+                "Fulfillment claimed for order_id=%s session_id=%s event_id=%s",
+                order_id,
+                session_id,
+                event_id,
+            )
+
+            await deliver_product(order_id)
+
             await db.execute(
                 update(Order)
                 .where(Order.id == order_id)
-                .where(Order.fulfillment_status == FulfillmentStatus.pending)
-                .values(fulfillment_status=FulfillmentStatus.processing)
-            ),
-        )
-
-        if claim_update.rowcount != 1:
-            logger.info("Fulfillment already claimed.")
-            return
-
-        logger.info("Fulfillment claimed.")
-
-        await deliver_product(order_id)
-
-        await db.execute(
-            update(Order)
-            .where(Order.id == order_id)
-            .where(Order.fulfillment_status == FulfillmentStatus.processing)
-            .values(
-                fulfillment_status=FulfillmentStatus.fulfilled,
-                fulfilled_at=datetime.now(UTC),
+                .where(Order.fulfillment_status == FulfillmentStatus.processing)
+                .values(
+                    fulfillment_status=FulfillmentStatus.fulfilled,
+                    fulfilled_at=datetime.now(UTC),
+                )
             )
+
+    except Exception:
+        logger.exception(
+            "Fulfillment failed for order_id=%s session_id=%s event_id=%s",
+            order_id,
+            session_id,
+            event_id,
         )
 
 
