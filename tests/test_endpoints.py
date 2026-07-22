@@ -1,6 +1,7 @@
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -721,3 +722,62 @@ async def test_fulfillment_failure_leaves_order_pending(
     assert updated_order.status == OrderStatus.paid
     assert updated_order.fulfillment_status == FulfillmentStatus.pending
     assert updated_order.fulfilled_at is None
+
+
+@pytest.mark.anyio
+async def test_orders_requires_api_key(client: TestClient) -> None:
+    response = client.get("/orders")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing API key"
+
+
+@pytest.mark.anyio
+async def test_orders_reject_wrong_api_key(client: TestClient) -> None:
+    response = client.get(
+        "/orders",
+        headers={"X-API-Key": "wrong-key"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid API key"
+
+
+@pytest.mark.anyio
+async def test_orders_lists_status(
+    client: TestClient,
+    db_session: AsyncSession,
+) -> None:
+    order = Order(
+        stripe_session_id="cs_test_orders",
+        stripe_payment_intent="pi_test_orders",
+        amount=4999,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.fulfilled,
+        fulfilled_at=datetime.now(UTC),
+        livemode=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    response = client.get(
+        "/orders",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    orders = response.json()
+
+    assert len(orders) == 1
+    assert orders[0]["id"] - -order.id
+    assert orders[0]["stripe_session_id"] == "cs_test_orders"
+    assert orders[0]["stripe_payment_intent"] == "pi_test_orders"
+    assert orders[0]["amount"] == 4999
+    assert orders[0]["currency"] == "USD"
+    assert orders[0]["status"] == "paid"
+    assert orders[0]["fulfillment_status"] == "fulfilled"
+    assert orders[0]["fulfilled_at"] is not None
+    assert orders[0]["created_at"] is not None
