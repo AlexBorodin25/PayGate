@@ -12,13 +12,25 @@ from app.security import require_orders_api_key
 router = APIRouter(tags=["Orders"])
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
-RequireOrderApiKey = Annotated[None, Depends(require_orders_api_key)]
+RequireOrdersApiKey = Annotated[None, Depends(require_orders_api_key)]
 
 
-@router.get("/orders", response_model=list[OrderResponse])
+@router.get(
+    "/orders",
+    response_model=list[OrderResponse],
+    summary="List orders",
+    description=(
+        "Protected operator endpoint. Lists orders with payment status, "
+        "fulfillment status, and fulfilled_at so stuck orders are visible."
+    ),
+    responses={
+        200: {"description": "Orders returned"},
+        401: {"description": "Missing or invalid X-API-Key"},
+    },
+)
 async def list_orders(
     db: DatabaseSession,
-    _: RequireOrderApiKey,
+    _: RequireOrdersApiKey,
 ) -> list[Order]:
     result = await db.scalars(select(Order).order_by(Order.created_at.desc()))
     return list(result)
