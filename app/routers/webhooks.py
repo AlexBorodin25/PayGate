@@ -41,26 +41,17 @@ async def run_fulfillment(order_id: int) -> None:
 
         logger.info("Fulfillment claimed.")
 
-        try:
-            await deliver_product(order_id)
+        await deliver_product(order_id)
 
-            await db.execute(
-                update(Order)
-                .where(Order.id == order_id)
-                .where(Order.fulfillment_status == FulfillmentStatus.processing)
-                .values(
-                    fulfillment_status=FulfillmentStatus.fulfilled,
-                    fulfilled_at=datetime.now(UTC),
-                )
+        await db.execute(
+            update(Order)
+            .where(Order.id == order_id)
+            .where(Order.fulfillment_status == FulfillmentStatus.processing)
+            .values(
+                fulfillment_status=FulfillmentStatus.fulfilled,
+                fulfilled_at=datetime.now(UTC),
             )
-        except Exception:
-            await db.execute(
-                update(Order)
-                .where(Order.id == order_id)
-                .where(Order.fulfillment_status == FulfillmentStatus.processing)
-                .values(fulfillment_status=FulfillmentStatus.pending)
-            )
-            raise
+        )
 
 
 @router.post(
