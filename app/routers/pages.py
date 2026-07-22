@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +17,7 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.get("/")
-async def product_page(request: Request, db: DatabaseSession):
+async def product_page(request: Request, db: DatabaseSession) -> Response:
     products = await list_products(db)
 
     return templates.TemplateResponse(
