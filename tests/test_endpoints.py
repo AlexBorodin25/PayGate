@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -433,6 +434,7 @@ async def test_webhook_missing_signature(client: AsyncClient) -> None:
 @pytest.mark.anyio
 async def test_webhook_ignores_other_event_types(
     client: AsyncClient,
+    db_session: AsyncSession,
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(
@@ -454,12 +456,26 @@ async def test_webhook_ignores_other_event_types(
     assert response.status_code == 200
     assert response.json() == {"received": True}
 
+    orders = (await db_session.execute(select(Order))).scalars().all()
+    assert orders == []
+
 
 @pytest.mark.anyio
 async def test_webhook_ignores_unpaid_checkout(
     client: AsyncClient,
+    db_session: AsyncSession,
     monkeypatch: Any,
 ) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    order_id = order.id
+    product_id = product.id
+    product_price = product.price
+    product_currency = product.currency
+
+    await db_session.rollback()
+
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
         "construct_event",
@@ -468,7 +484,14 @@ async def test_webhook_ignores_unpaid_checkout(
             type="checkout.session.completed",
             data=SimpleNamespace(
                 object=SimpleNamespace(
+                    id="cs_test_123",
                     payment_status="unpaid",
+                    client_reference_id=str(order_id),
+                    metadata={"product_id": product_id},
+                    amount_total=product_price,
+                    currency=product_currency.lower(),
+                    livemode=False,
+                    payment_intent="pi_test_123",
                 )
             ),
         ),
@@ -481,7 +504,12 @@ async def test_webhook_ignores_unpaid_checkout(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"received": True}
+
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.pending
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
 
 
 @pytest.mark.anyio
