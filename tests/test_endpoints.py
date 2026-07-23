@@ -657,6 +657,44 @@ async def test_webhook_invalid_signature_returns_400(
     orders = (await db_session.execute(select(Order))).scalars().all()
     assert orders == []
 
+@pytest.mark.anyio
+async def test_webhook_missing_order_returns_200(
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_test_missing_order",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    id="cs_missing_order",
+                    payment_status="paid",
+                    client_reference_id="999999",
+                    metadata={"product_id": "speaker"},
+                    amount_total=4999,
+                    currency="usd",
+                    livemode=False,
+                    payment_intent="pi_missing_order",
+                )
+            ),
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+
+    orders = (await db_session.execute(select(Order))).scalars().all()
+    assert orders == []
+
 
 @pytest.mark.anyio
 async def test_fulfillment_failure_leaves_order_pending(

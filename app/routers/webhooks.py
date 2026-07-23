@@ -156,7 +156,7 @@ async def stripe_webhook(
 
             if order is None:
                 logger.warning(
-                    "Stripe webhook referenced unknown order_id.",
+                    "Stripe webhook referenced unknown order_id=%s.",
                     parsed_order_id,
                 )
                 return {"received": True}
