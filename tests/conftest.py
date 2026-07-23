@@ -64,10 +64,7 @@ async def db_session(
     test_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AsyncSession]:
     async with test_sessionmaker() as session:
-        try:
-            yield session
-        finally:
-            await session.rollback()
+        yield session
 
 
 @pytest.fixture
