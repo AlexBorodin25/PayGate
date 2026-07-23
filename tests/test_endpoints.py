@@ -600,6 +600,57 @@ async def test_webhook_marks_order_paid_and_fulfilled(
 
     assert delivered_orders == [order_id]
 
+@pytest.mark.anyio
+async def test_webhook_does_not_fulfill_on_currency_mismatch(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    order_id = order.id
+    product_id = product.id
+    product_price = product.price
+
+    await db_session.rollback()
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_test_currency_mismatch",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    id="cs_test_123",
+                    payment_status="paid",
+                    client_reference_id=str(order_id),
+                    metadata={"product_id": product_id},
+                    amount_total=product_price,
+                    currency="eur",
+                    livemode=False,
+                    payment_intent="pi_test_123",
+                )
+            ),
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.pending
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
+    assert updated_order.fulfilled_at is None
+
 
 @pytest.mark.anyio
 async def test_webhook_does_not_fulfill_on_amount_mismatch(
