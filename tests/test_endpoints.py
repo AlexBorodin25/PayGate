@@ -628,6 +628,35 @@ async def test_webhook_does_not_fulfill_on_amount_mismatch(
     assert updated_product is not None
     assert updated_product.quantity == 10
 
+@pytest.mark.anyio
+async def test_webhook_invalid_signature_returns_400(
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: Any,
+) -> None:
+    def raise_signature_error(payload: bytes, sig_header: str, secret: str) -> None:
+        raise webhooks_router.stripe.SignatureVerificationError(
+            message="bad signature",
+            sig_header=sig_header,
+        )
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        raise_signature_error,
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "bad-signature"},
+    )
+
+    assert response.status_code == 400
+
+    orders = (await db_session.execute(select(Order))).scalars().all()
+    assert orders == []
+
 
 @pytest.mark.anyio
 async def test_fulfillment_failure_leaves_order_pending(
