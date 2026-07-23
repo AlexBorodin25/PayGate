@@ -24,4 +24,4 @@ disallow_subclassing_any = false
 pythonpath =["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=app --cov-report=term-missing"
+addopts = "--cov=app --cov-report=term-missing --cov-fail-under=80"

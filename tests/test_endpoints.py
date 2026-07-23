@@ -290,6 +290,38 @@ async def test_checkout_uses_app_base_url(
     assert captured_kwargs["success_url"] == "http://test/success"
     assert captured_kwargs["cancel_url"] == "http://test/cancel"
 
+@pytest.mark.anyio
+async def test_checkout_uses_server_side_price(
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: Any,
+) -> None:
+    await add_test_product(db_session)
+
+    captured_kwargs = {}
+
+    def fake_create(**kwargs: Any) -> SimpleNamespace:
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            id="cs_test_server_price",
+            url="https://checkout.stripe.com/test",
+            livemode=False,
+        )
+
+    monkeypatch.setattr(
+        checkout_router.stripe.checkout.Session,
+        "create",
+        fake_create,
+    )
+
+    response = await client.post(
+        "/checkout",
+        json={"product_id": "speaker", "price": 100},
+    )
+
+    assert response.status_code == 200
+    assert captured_kwargs["line_items"][0]["price_data"]["unit_amount"] == 4999
+
 
 @pytest.mark.anyio
 async def test_success_page_does_not_mutate(
