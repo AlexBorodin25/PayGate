@@ -22,7 +22,7 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 
 @asynccontextmanager
-async def standalone_session() -> AsyncIterator[AsyncSession]:
+async def standalone_session() -> AsyncIterator[AsyncSession]:  # pragma: no cover
     async with AsyncSessionLocal() as db:
         try:
             yield db

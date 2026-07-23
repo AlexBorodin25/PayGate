@@ -8,6 +8,28 @@ jobs:
   ruff:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: paygate_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d paygate_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+          
+    env:
+      STRIPE_SECRET_KEY: test
+      STRIPE_WEBHOOK_SECRET: test
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/paygate_test
+      APP_BASE_URL: http://test
+      ORDERS_API_KEY: test
+
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -35,4 +57,4 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: .
-        run: pytest --cov=app --cov-report=term-missing
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=80
