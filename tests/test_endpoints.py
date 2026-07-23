@@ -912,3 +912,50 @@ async def test_orders_lists_status(
     assert orders[0]["fulfillment_status"] == "fulfilled"
     assert orders[0]["fulfilled_at"] is not None
     assert orders[0]["created_at"] is not None
+
+
+@pytest.mark.anyio
+async def test_concurrent_identical_fulfillments_deliver_once(
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    order_id = order.id
+    await db_session.rollback()
+
+    delivered_orders = []
+
+    async def fake_deliver_product(order_id: int) -> None:
+        delivered_orders.append(order_id)
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        webhooks_router.fulfillment_service,
+        "deliver_product",
+        fake_deliver_product,
+    )
+    monkeypatch.setattr(webhooks_router, "standalone_session", fake_standalone_session)
+
+    await asyncio.gather(
+        webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test_1"),
+        webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test_1"),
+    )
+
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
+    assert updated_order.fulfilled_at is not None
+    assert delivered_orders == [order_id]
