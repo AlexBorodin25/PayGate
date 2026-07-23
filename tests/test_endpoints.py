@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -5,7 +6,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,6 +14,7 @@ from app.models import FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
 from app.routers import products as products_router
 from app.routers import webhooks as webhooks_router
+from app.services.products import get_product
 
 
 async def add_test_product(db_session: AsyncSession) -> Product:
@@ -106,6 +107,24 @@ async def test_products_endpoint(
     assert products[0]["quantity"] == 10
     assert products[0]["display_price"] == "49.99 USD"
 
+@pytest.mark.anyio
+async def test_get_product_returns_active_product(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    found = await get_product(db_session, product.id)
+
+    assert found is not None
+    assert found.id == "speaker"
+
+@pytest.mark.anyio
+async def test_get_product_returns_none_for_missing_product(
+    db_session: AsyncSession,
+) -> None:
+    found = await get_product(db_session, "missing")
+
+    assert found is None
 
 @pytest.mark.anyio
 async def test_checkout_success(
@@ -291,11 +310,12 @@ async def test_checkout_uses_app_base_url(
     assert captured_kwargs["success_url"] == "http://test/success"
     assert captured_kwargs["cancel_url"] == "http://test/cancel"
 
+
 @pytest.mark.anyio
 async def test_checkout_uses_server_side_price(
-        client: AsyncClient,
-        db_session: AsyncSession,
-        monkeypatch: Any,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
 ) -> None:
     await add_test_product(db_session)
 
@@ -600,6 +620,7 @@ async def test_webhook_marks_order_paid_and_fulfilled(
 
     assert delivered_orders == [order_id]
 
+
 @pytest.mark.anyio
 async def test_webhook_does_not_fulfill_on_currency_mismatch(
     client: AsyncClient,
@@ -707,11 +728,12 @@ async def test_webhook_does_not_fulfill_on_amount_mismatch(
     assert updated_product is not None
     assert updated_product.quantity == 10
 
+
 @pytest.mark.anyio
 async def test_webhook_invalid_signature_returns_400(
-        client: AsyncClient,
-        db_session: AsyncSession,
-        monkeypatch: Any,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
 ) -> None:
     def raise_signature_error(payload: bytes, sig_header: str, secret: str) -> None:
         raise webhooks_router.stripe.SignatureVerificationError(
@@ -736,11 +758,12 @@ async def test_webhook_invalid_signature_returns_400(
     orders = (await db_session.execute(select(Order))).scalars().all()
     assert orders == []
 
+
 @pytest.mark.anyio
 async def test_webhook_missing_order_returns_200(
-        client: AsyncClient,
-        db_session: AsyncSession,
-        monkeypatch: Any,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
@@ -953,6 +976,7 @@ async def test_concurrent_identical_fulfillments_deliver_once(
         webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test_1"),
     )
 
+    db_session.expire_all()
     updated_order = await db_session.get(Order, order_id)
 
     assert updated_order is not None
