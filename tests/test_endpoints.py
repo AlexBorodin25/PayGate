@@ -107,6 +107,7 @@ async def test_products_endpoint(
     assert products[0]["quantity"] == 10
     assert products[0]["display_price"] == "49.99 USD"
 
+
 @pytest.mark.anyio
 async def test_get_product_returns_active_product(
     db_session: AsyncSession,
@@ -118,6 +119,7 @@ async def test_get_product_returns_active_product(
     assert found is not None
     assert found.id == "speaker"
 
+
 @pytest.mark.anyio
 async def test_get_product_returns_none_for_missing_product(
     db_session: AsyncSession,
@@ -125,6 +127,7 @@ async def test_get_product_returns_none_for_missing_product(
     found = await get_product(db_session, "missing")
 
     assert found is None
+
 
 @pytest.mark.anyio
 async def test_checkout_success(
