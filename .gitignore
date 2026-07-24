@@ -8,3 +8,6 @@ __pycache__/
 .mypy_cache/
 .env.*
 !.env.example
+.coverage
+htmlcov/
+coverage.xml
