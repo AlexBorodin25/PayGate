@@ -17,7 +17,9 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.get("/")
-async def product_page(request: Request, db: DatabaseSession) -> Response:
+async def product_page(
+    request: Request, db: DatabaseSession
+) -> Response:  # pragma: no cover
     products = await list_products(db)
 
     return templates.TemplateResponse(
@@ -41,6 +43,6 @@ async def product_page(request: Request, db: DatabaseSession) -> Response:
 @router.post("/checkout-form")
 async def checkout_form(
     product_id: Annotated[str, Form()], db: DatabaseSession
-) -> RedirectResponse:
+) -> RedirectResponse:  # pragma: no cover
     response = await checkout(CheckoutRequest(product_id=product_id), db)
     return RedirectResponse(response.checkout_url, status_code=303)

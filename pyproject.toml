@@ -23,3 +23,11 @@ disallow_subclassing_any = false
 [tool.pytest.ini_options]
 pythonpath =["."]
 testpaths = ["tests"]
+asyncio_mode = "strict"
+addopts = "--cov=app --cov-report=term-missing --cov-fail-under=80"
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
