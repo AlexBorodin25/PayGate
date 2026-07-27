@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -23,6 +23,11 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("products.id"),
+        nullable=True,
+    )
 
     stripe_session_id: Mapped[str | None] = mapped_column(
         String(255),
@@ -50,6 +55,18 @@ class Order(Base):
         Enum(FulfillmentStatus, name="fulfillment_status"),
         default=FulfillmentStatus.pending,
         nullable=False,
+    )
+
+    reservation_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    stock_reserved: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
 
     fulfilled_at: Mapped[datetime | None] = mapped_column(

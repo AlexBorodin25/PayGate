@@ -11,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db, standalone_session
-from app.models import FulfillmentStatus, Order, OrderStatus, ProcessedWebhookEvent
+from app.models import (
+    FulfillmentStatus,
+    Order,
+    OrderStatus,
+    ProcessedWebhookEvent,
+    Product,
+)
 from app.services.fulfillment import fulfillment_service
 
 router = APIRouter(tags=["Stripe Webhooks"])
@@ -126,9 +132,8 @@ async def stripe_webhook(
         return {"received": True}
 
     order_id = session.client_reference_id
-
     metadata = session.metadata or {}
-    product_id = metadata["product_id"] if "product_id" in metadata else None
+    product_id = metadata.get("product_id")
 
     if order_id is None or product_id is None:
         logger.warning("Stripe webhook missing checkout metadata.")
@@ -137,7 +142,7 @@ async def stripe_webhook(
     try:
         parsed_order_id = int(order_id)
     except ValueError:
-        logger.warning("Stripe webhook had malformed order_id", order_id)
+        logger.warning("Stripe webhook had malformed order_id=%s", order_id)
         return {"received": True}
 
     payment_intent = session.payment_intent
@@ -162,19 +167,80 @@ async def stripe_webhook(
                 return {"received": True}
 
             if order.stripe_session_id != session.id:
-                logger.warning("Stripe session does not match order_id.")
+                logger.warning(
+                    "Stripe session mismatch for order_id=%s session_id=%s event_id=%s",
+                    parsed_order_id,
+                    session.id,
+                    event_id,
+                )
+                return {"received": True}
+
+            if order.product_id != product_id:
+                logger.warning(
+                    "Stripe product mismatch for order_id=%s session_id=%s event_id=%s",
+                    parsed_order_id,
+                    session.id,
+                    event_id,
+                )
                 return {"received": True}
 
             if order.amount != session.amount_total:
-                logger.warning("Stripe amount mismatch for order_id.")
+                logger.warning(
+                    "Stripe amount mismatch for order_id=%s session_id=%s event_id=%s",
+                    parsed_order_id,
+                    session.id,
+                    event_id,
+                )
                 return {"received": True}
 
             if order.currency.lower() != session.currency:
-                logger.warning("Stripe currency mismatch for order_id.")
+                logger.warning(
+                    "Stripe currency mismatch for order_id=%s "
+                    "session_id=%s event_id=%s",
+                    parsed_order_id,
+                    session.id,
+                    event_id,
+                )
                 return {"received": True}
 
             if order.livemode != session.livemode:
-                logger.warning("Stripe livemode mismatch for order_id.")
+                logger.warning(
+                    "Stripe livemode mismatch for order_id=%s "
+                    "session_id=%s event_id=%s",
+                    parsed_order_id,
+                    session.id,
+                    event_id,
+                )
+                return {"received": True}
+
+            if order.reservation_expires_at is None:
+                logger.warning(
+                    "Paid order has no reservation expiration for order_id=%s "
+                    "session_id=%s event_id=%s",
+                    parsed_order_id,
+                    session.id,
+                    event_id,
+                )
+                return {"received": True}
+
+            if order.reservation_expires_at <= datetime.now(UTC):
+                if order.stock_reserved and order.product_id is not None:
+                    await db.execute(
+                        update(Product)
+                        .where(Product.id == order.product_id)
+                        .values(quantity=Product.quantity + 1)
+                    )
+                    order.stock_reserved = False
+
+                order.status = OrderStatus.checkout_failed
+
+                logger.warning(
+                    "Paid order arrived after reservation expired for order_id=%s "
+                    "session_id=%s event_id=%s",
+                    parsed_order_id,
+                    session.id,
+                    event_id,
+                )
                 return {"received": True}
 
             paid_update = cast(
@@ -185,6 +251,7 @@ async def stripe_webhook(
                     .where(Order.status == OrderStatus.pending)
                     .values(
                         status=OrderStatus.paid,
+                        stock_reserved=False,
                         stripe_payment_intent=payment_intent,
                         fulfillment_status=FulfillmentStatus.pending,
                     )

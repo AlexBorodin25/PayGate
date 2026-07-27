@@ -1,8 +1,9 @@
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -16,8 +17,60 @@ from app.services.products import get_product
 router = APIRouter(tags=["Checkout"])
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
+RESERVATION_MINUTES = 10
 
 stripe.api_key = settings.stripe_secret_key
+
+
+async def release_expired_reservations(db: AsyncSession) -> None:
+    now = datetime.now(UTC)
+
+    expired_orders = (
+        (
+            await db.execute(
+                select(Order).where(
+                    Order.status == OrderStatus.pending,
+                    Order.stock_reserved.is_(True),
+                    Order.reservation_expires_at <= now,
+                    Order.product_id.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    if not expired_orders:
+        return
+
+    for order in expired_orders:
+        await db.execute(
+            update(Product)
+            .where(Product.id == order.product_id)
+            .values(quantity=Product.quantity + 1)
+        )
+
+        order.stock_reserved = False
+        order.status = OrderStatus.checkout_failed
+
+    await db.commit()
+
+
+async def restore_reserved_stock(
+    db: AsyncSession,
+    order: Order,
+    product_id: str,
+) -> None:
+    if order.stock_reserved:
+        await db.execute(
+            update(Product)
+            .where(Product.id == product_id)
+            .values(quantity=Product.quantity + 1)
+        )
+        order.stock_reserved = False
+
+    order.status = OrderStatus.checkout_failed
+    await db.commit()
 
 
 @router.post(
@@ -27,7 +80,7 @@ stripe.api_key = settings.stripe_secret_key
     description=(
         "Creates a pending order and Stripe Checkout Session for a product. "
         "The client sends only a product id. Price and currency are resolved "
-        "server-side."
+        "server-side. Stock is reserved for 10 minutes before checkout starts."
     ),
     responses={
         404: {"description": "Product not found"},
@@ -37,10 +90,14 @@ stripe.api_key = settings.stripe_secret_key
     },
 )
 async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutResponse:
+    await release_expired_reservations(db)
+
     product = await get_product(db, request.product_id)
 
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    reservation_expires_at = datetime.now(UTC) + timedelta(minutes=RESERVATION_MINUTES)
 
     stock_update = cast(
         CursorResult[Any],
@@ -56,9 +113,12 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
         raise HTTPException(status_code=409, detail="Product is out of stock")
 
     order = Order(
+        product_id=product.id,
         amount=product.price,
         currency=product.currency,
         status=OrderStatus.pending,
+        reservation_expires_at=reservation_expires_at,
+        stock_reserved=True,
     )
     db.add(order)
     await db.commit()
@@ -98,26 +158,16 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
         ) from error
 
     except stripe.StripeError as error:
-        order.status = OrderStatus.checkout_failed
-        await db.execute(
-            update(Product)
-            .where(Product.id == product.id)
-            .values(quantity=Product.quantity + 1)
-        )
-        await db.commit()
+        await restore_reserved_stock(db, order, product.id)
+
         raise HTTPException(
             status_code=502,
             detail="Could not create checkout session.",
         ) from error
 
     if session.url is None:
-        order.status = OrderStatus.checkout_failed
-        await db.execute(
-            update(Product)
-            .where(Product.id == product.id)
-            .values(quantity=Product.quantity + 1)
-        )
-        await db.commit()
+        await restore_reserved_stock(db, order, product.id)
+
         raise HTTPException(
             status_code=502,
             detail="Stripe checkout session did not include a URL",

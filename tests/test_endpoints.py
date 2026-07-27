@@ -204,9 +204,9 @@ async def test_checkout_connection_error_pending_order(
 
 @pytest.mark.anyio
 async def test_checkout_stripe_error_order_failed(
-        client: AsyncClient,
-        db_session: AsyncSession,
-        monkeypatch: Any,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
 ) -> None:
     product = await add_test_product(db_session)
 
@@ -238,9 +238,9 @@ async def test_checkout_stripe_error_order_failed(
 
 @pytest.mark.anyio
 async def test_checkout_without_url(
-        client: AsyncClient,
-        db_session: AsyncSession,
-        monkeypatch: Any,
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
 ) -> None:
     product = await add_test_product(db_session)
 
