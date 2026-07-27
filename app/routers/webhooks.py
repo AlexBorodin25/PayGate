@@ -214,9 +214,14 @@ async def stripe_webhook(
                 return {"received": True}
 
             if order.reservation_expires_at is None:
-                logger.warning(
+                order.status = OrderStatus.paid
+                order.stock_reserved = False
+                order.stripe_payment_intent = payment_intent
+                order.fulfillment_status = FulfillmentStatus.payment_review
+
+                logger.error(
                     "Paid order has no reservation expiration for order_id=%s "
-                    "session_id=%s event_id=%s",
+                    "session_id=%s event_id=%s. Manual review or refund required.",
                     parsed_order_id,
                     session.id,
                     event_id,
@@ -224,24 +229,50 @@ async def stripe_webhook(
                 return {"received": True}
 
             if order.reservation_expires_at <= datetime.now(UTC):
-                if order.stock_reserved and order.product_id is not None:
-                    await db.execute(
-                        update(Product)
-                        .where(Product.id == order.product_id)
-                        .values(quantity=Product.quantity + 1)
-                    )
+                if order.product_id is None:
+                    order.status = OrderStatus.paid
                     order.stock_reserved = False
+                    order.stripe_payment_intent = payment_intent
+                    order.fulfillment_status = FulfillmentStatus.payment_review
 
-                order.status = OrderStatus.checkout_failed
+                    logger.error(
+                        "Paid order has no product_id after reservation expired "
+                        "for order_id=%s session_id=%s event_id=%s. "
+                        "Manual review or refund required.",
+                        parsed_order_id,
+                        session.id,
+                        event_id,
+                    )
+                    return {"received": True}
 
-                logger.warning(
-                    "Paid order arrived after reservation expired for order_id=%s "
-                    "session_id=%s event_id=%s",
-                    parsed_order_id,
-                    session.id,
-                    event_id,
-                )
-                return {"received": True}
+                if order.stock_reserved:
+                    order.stock_reserved = False
+                else:
+                    late_stock_update = cast(
+                        CursorResult[Any],
+                        await db.execute(
+                            update(Product)
+                            .where(Product.id == order.product_id)
+                            .where(Product.quantity > 0)
+                            .values(quantity=Product.quantity - 1)
+                        ),
+                    )
+
+                    if late_stock_update.rowcount != 1:
+                        order.status = OrderStatus.paid
+                        order.stock_reserved = False
+                        order.stripe_payment_intent = payment_intent
+                        order.fulfillment_status = FulfillmentStatus.payment_review
+
+                        logger.error(
+                            "Paid order arrived after reservation expired but no "
+                            "stock remained for order_id=%s session_id=%s "
+                            "event_id=%s. Manual review or refund required.",
+                            parsed_order_id,
+                            session.id,
+                            event_id,
+                        )
+                        return {"received": True}
 
             paid_update = cast(
                 CursorResult[Any],

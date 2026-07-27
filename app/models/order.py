@@ -17,6 +17,7 @@ class FulfillmentStatus(enum.StrEnum):
     pending = "pending"
     processing = "processing"
     fulfilled = "fulfilled"
+    payment_review = "payment_review"
 
 
 class Order(Base):
