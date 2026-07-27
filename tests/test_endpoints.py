@@ -204,11 +204,13 @@ async def test_checkout_connection_error_pending_order(
 
 @pytest.mark.anyio
 async def test_checkout_stripe_error_order_failed(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    monkeypatch: Any,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: Any,
 ) -> None:
-    await add_test_product(db_session)
+    product = await add_test_product(db_session)
+
+    product_id = product.id
 
     def raise_stripe_error(**kwargs: Any) -> None:
         raise checkout_router.stripe.StripeError("Stripe rejected request")
@@ -219,24 +221,36 @@ async def test_checkout_stripe_error_order_failed(
         raise_stripe_error,
     )
 
-    response = await client.post("/checkout", json={"product_id": "speaker"})
+    response = await client.post("/checkout", json={"product_id": product_id})
 
     assert response.status_code == 502
+    assert response.json()["detail"] == "Could not create checkout session."
 
     order = (await db_session.execute(select(Order))).scalar_one()
+    updated_product = await db_session.get(Product, product_id)
+
     assert order.status == OrderStatus.checkout_failed
     assert order.stripe_session_id is None
+
+    assert updated_product is not None
+    assert updated_product.quantity == 10
 
 
 @pytest.mark.anyio
 async def test_checkout_without_url(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    monkeypatch: Any,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        monkeypatch: Any,
 ) -> None:
-    await add_test_product(db_session)
+    product = await add_test_product(db_session)
 
-    fake_session = SimpleNamespace(id="test_1", url=None, livemode=False)
+    product_id = product.id
+
+    fake_session = SimpleNamespace(
+        id="test_1",
+        url=None,
+        livemode=False,
+    )
 
     monkeypatch.setattr(
         checkout_router.stripe.checkout.Session,
@@ -244,13 +258,19 @@ async def test_checkout_without_url(
         lambda **kwargs: fake_session,
     )
 
-    response = await client.post("/checkout", json={"product_id": "speaker"})
+    response = await client.post("/checkout", json={"product_id": product_id})
 
     assert response.status_code == 502
+    assert response.json()["detail"] == "Stripe checkout session did not include a URL"
 
     order = (await db_session.execute(select(Order))).scalar_one()
+    updated_product = await db_session.get(Product, product_id)
+
     assert order.status == OrderStatus.checkout_failed
     assert order.stripe_session_id is None
+
+    assert updated_product is not None
+    assert updated_product.quantity == 10
 
 
 @pytest.mark.anyio
