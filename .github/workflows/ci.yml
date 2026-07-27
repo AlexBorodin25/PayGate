@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  ruff:
+  quality:
     runs-on: ubuntu-latest
 
     services:
@@ -49,12 +49,18 @@ jobs:
         run: ruff check .
 
       - name: Ruff format
-        run: ruff format --check
+        run: ruff format --check .
 
       - name: Mypy check
         run: mypy app
 
-      - name: Run tests
+      - name: Dependency scan
+        run: pip-audit
+
+      - name: Run tests with coverage
         env:
           PYTHONPATH: .
         run: pytest --cov=app --cov-report=term-missing --cov-fail-under=80
+
+      - name: Docker build
+        run: docker build -t paygate .
