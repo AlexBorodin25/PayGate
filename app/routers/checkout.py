@@ -2,11 +2,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
 import stripe
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import Response
 
 from app.config import settings
 from app.db import get_db
@@ -16,6 +18,7 @@ from app.services.products import get_product
 
 router = APIRouter(tags=["Checkout"])
 
+templates = Jinja2Templates(directory="app/templates")
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 RESERVATION_MINUTES = 10
 
@@ -170,7 +173,7 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
                 }
             ],
             idempotency_key=f"checkout-order-{order.id}",
-            success_url=f"{settings.app_base_url}/success",
+            success_url=f"{settings.app_base_url}/success?order_id={order.id}",
             cancel_url=f"{settings.app_base_url}/cancel",
         )
 
@@ -211,14 +214,18 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
     summary="Checkout success landing endpoint",
     description=(
         "Landing endpoint after Stripe redirects the user back. "
-        "Does not verify payment or mutate order state."
+        "Displays order state but does not mutate payment state."
     ),
 )
-async def success() -> dict[str, str]:
-    return {
-        "status": "pending_confirmation",
-        "message": "Payment confirmation is being processed.",
-    }
+async def success(
+    request: Request,
+    order_id: int | None = None,
+) -> Response:
+    return templates.TemplateResponse(
+        request=request,
+        name="success.html",
+        context={"order_id": order_id},
+    )
 
 
 @router.get(
@@ -229,3 +236,22 @@ async def success() -> dict[str, str]:
 )
 async def cancel() -> dict[str, str]:
     return {"status": "cancelled", "message": "Checkout cancelled."}
+
+
+@router.get("/orders/{order_id}/status")
+async def order_status(
+    order_id: int,
+    db: DatabaseSession,
+) -> dict[str, str | None]:
+    order = await db.get(Order, order_id)
+
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "status": order.status.value,
+        "fulfillment_status": order.fulfillment_status.value,
+        "fulfilled_at": (
+            order.fulfilled_at.isoformat() if order.fulfilled_at is not None else None
+        ),
+    }

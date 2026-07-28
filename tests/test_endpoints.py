@@ -392,7 +392,7 @@ async def test_checkout_uses_app_base_url(
     )
 
     assert response.status_code == 200
-    assert captured_kwargs["success_url"] == "http://test/success"
+    assert captured_kwargs["success_url"].startswith("http://test/success?order_id=")
     assert captured_kwargs["cancel_url"] == "http://test/cancel"
 
 
@@ -434,16 +434,46 @@ async def test_success_page_does_not_mutate(
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    response = await client.get("/success")
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.get(f"/success?order_id={order.id}")
+
+    assert response.status_code == 200
+    assert "Payment confirmation is being processed" in response.text
+    assert "PayGate" in response.text
+
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.pending
+    assert order.fulfillment_status == FulfillmentStatus.pending
+
+
+@pytest.mark.anyio
+async def test_order_status_endpoint(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.get(f"/orders/{order.id}/status")
 
     assert response.status_code == 200
     assert response.json() == {
-        "status": "pending_confirmation",
-        "message": "Payment confirmation is being processed.",
+        "status": "pending",
+        "fulfillment_status": "pending",
+        "fulfilled_at": None,
     }
 
-    orders = (await db_session.execute(select(Order))).scalars().all()
-    assert len(orders) == 0
+
+@pytest.mark.anyio
+async def test_order_status_unknown_order(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/orders/999999/status")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Order not found"
 
 
 @pytest.mark.anyio

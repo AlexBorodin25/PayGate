@@ -2,27 +2,20 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers.checkout import cancel, checkout, success
-from app.routers.orders import list_orders
-from app.routers.pages import checkout_form, product_page
-from app.routers.products import get_products
-from app.routers.webhooks import stripe_webhook
+from app.routers import checkout, orders, pages, products, webhooks
 
 app = FastAPI(
     title="PayGate",
-    description=("A Stripe Checkout payment service for digital products."),
+    description="A Stripe Checkout payment service for digital products.",
 )
 
 app.state.settings = settings
 
-app.add_api_route("/", product_page, methods=["GET"])
-app.add_api_route("/checkout-form", checkout_form, methods=["POST"])
-app.add_api_route("/products", get_products, methods=["GET"])
-app.add_api_route("/checkout", checkout, methods=["POST"])
-app.add_api_route("/success", success, methods=["GET"])
-app.add_api_route("/cancel", cancel, methods=["GET"])
-app.add_api_route("/webhooks/stripe", stripe_webhook, methods=["POST"])
-app.add_api_route("/orders", list_orders, methods=["GET"], response_model=None)
+app.include_router(products.router)
+app.include_router(checkout.router)
+app.include_router(webhooks.router)
+app.include_router(pages.router)
+app.include_router(orders.router)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
