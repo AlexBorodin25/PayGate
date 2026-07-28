@@ -146,7 +146,7 @@ async def stripe_webhook(
         return {"received": True}
 
     payment_intent = session.payment_intent
-    won_paid_transition = False
+    should_schedule_fulfillment = False
 
     try:
         async with db.begin():
@@ -289,11 +289,39 @@ async def stripe_webhook(
                 ),
             )
 
-            won_paid_transition = paid_update.rowcount == 1
+            should_schedule_fulfillment = paid_update.rowcount == 1
+
+            if not should_schedule_fulfillment:
+                refreshed_order = await db.get(Order, parsed_order_id)
+
+                should_schedule_fulfillment = (
+                    refreshed_order is not None
+                    and refreshed_order.status == OrderStatus.paid
+                    and refreshed_order.fulfillment_status == FulfillmentStatus.pending
+                )
 
     except IntegrityError:
-        logger.info("Duplicate Stripe webhook event ignored")
-        return {"received": True}
+        await db.rollback()
+
+        logger.info("Duplicate Stripe webhook event received for event_id=%s", event_id)
+
+        async with db.begin():
+            order = (
+                await db.execute(
+                    select(Order).where(Order.id == parsed_order_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+
+            should_schedule_fulfillment = (
+                order is not None
+                and order.stripe_session_id == session.id
+                and order.product_id == product_id
+                and order.amount == session.amount_total
+                and order.currency.lower() == session.currency
+                and order.livemode == session.livemode
+                and order.status == OrderStatus.paid
+                and order.fulfillment_status == FulfillmentStatus.pending
+            )
     except SQLAlchemyError as error:
         logger.exception("Transient database error while processing Stripe webhook.")
         raise HTTPException(
@@ -301,7 +329,7 @@ async def stripe_webhook(
             detail="Temporary database error.",
         ) from error
 
-    if won_paid_transition:
+    if should_schedule_fulfillment:
         background_tasks.add_task(
             run_fulfillment,
             parsed_order_id,
