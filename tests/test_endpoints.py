@@ -15,6 +15,7 @@ from app.models import FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
 from app.routers import products as products_router
 from app.routers import webhooks as webhooks_router
+from app.routers.checkout import release_expired_reservations
 from app.services.fulfillment import fulfillment_service
 from app.services.products import format_price, get_product, list_products
 
@@ -1458,6 +1459,59 @@ async def test_release_expired_reservations_restores_stock(
     assert order.status == OrderStatus.checkout_failed
     assert order.stock_reserved is False
     assert product.quantity == 1
+
+
+@pytest.mark.anyio
+async def test_concurrent_checkouts_do_not_double_release_expired_reservation(
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with test_sessionmaker() as setup_db:
+        product = Product(
+            id="speaker",
+            name="Portable Speaker",
+            price=4999,
+            currency="USD",
+            description="A waterproof Bluetooth speaker.",
+            quantity=0,
+            is_deleted=False,
+        )
+        setup_db.add(product)
+        await setup_db.commit()
+
+        order = Order(
+            product_id=product.id,
+            stripe_session_id="cs_test_expired",
+            amount=product.price,
+            currency=product.currency,
+            livemode=False,
+            status=OrderStatus.pending,
+            fulfillment_status=FulfillmentStatus.pending,
+            stock_reserved=True,
+            reservation_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+        setup_db.add(order)
+        await setup_db.commit()
+
+        order_id = order.id
+
+    async def release_once() -> None:
+        async with test_sessionmaker() as db:
+            await release_expired_reservations(db)
+
+    await asyncio.gather(
+        release_once(),
+        release_once(),
+    )
+
+    async with test_sessionmaker() as verify_db:
+        updated_product = await verify_db.get(Product, "speaker")
+        updated_order = await verify_db.get(Order, order_id)
+
+        assert updated_product is not None
+        assert updated_order is not None
+        assert updated_product.quantity == 1
+        assert updated_order.status == OrderStatus.checkout_failed
+        assert updated_order.stock_reserved is False
 
 
 @pytest.mark.anyio
