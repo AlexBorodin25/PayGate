@@ -1,11 +1,12 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import BackgroundTasks
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,7 +15,9 @@ from app.models import FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
 from app.routers import products as products_router
 from app.routers import webhooks as webhooks_router
-from app.services.products import get_product
+from app.routers.checkout import release_expired_reservations
+from app.services.fulfillment import fulfillment_service
+from app.services.products import format_price, get_product, list_products
 
 
 async def add_test_product(db_session: AsyncSession) -> Product:
@@ -32,21 +35,58 @@ async def add_test_product(db_session: AsyncSession) -> Product:
     return product
 
 
+def fake_checkout_completed_event(
+    *,
+    event_id: str,
+    order_id: int | str,
+    product_id: str,
+    amount: int = 4999,
+    currency: str = "usd",
+    session_id: str = "cs_test_123",
+    payment_status: str = "paid",
+    livemode: bool = False,
+    payment_intent: str = "pi_test_123",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=event_id,
+        type="checkout.session.completed",
+        data=SimpleNamespace(
+            object=SimpleNamespace(
+                id=session_id,
+                payment_status=payment_status,
+                client_reference_id=str(order_id),
+                metadata={"product_id": product_id},
+                amount_total=amount,
+                currency=currency,
+                livemode=livemode,
+                payment_intent=payment_intent,
+            )
+        ),
+    )
+
+
 async def add_test_order(
     db_session: AsyncSession,
     product: Product,
 ) -> Order:
     order = Order(
+        product_id=product.id,
         stripe_session_id="cs_test_123",
         amount=product.price,
         currency=product.currency,
         livemode=False,
+        reservation_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        stock_reserved=True,
     )
 
     db_session.add(order)
     await db_session.commit()
 
     return order
+
+
+def test_format_price() -> None:
+    assert format_price(4999, "usd") == "49.99 USD"
 
 
 @pytest.mark.anyio
@@ -157,6 +197,10 @@ async def test_checkout_success(
     assert data["order_id"] > 0
     assert data["checkout_url"] == "https://checkout.stripe.com/test-session"
 
+    updated_product = await db_session.get(Product, "speaker")
+    assert updated_product is not None
+    assert updated_product.quantity == 9
+
     order = await db_session.get(Order, data["order_id"])
     assert order is not None
     assert order.status == OrderStatus.pending
@@ -164,6 +208,9 @@ async def test_checkout_success(
     assert order.currency == "USD"
     assert order.stripe_session_id == "test_1"
     assert order.livemode is False
+    assert order.product_id == "speaker"
+    assert order.reservation_expires_at is not None
+    assert order.stock_reserved is True
 
 
 @pytest.mark.anyio
@@ -201,6 +248,14 @@ async def test_checkout_connection_error_pending_order(
     assert order.status == OrderStatus.pending
     assert order.stripe_session_id is None
 
+    updated_product = await db_session.get(Product, "speaker")
+
+    assert order.product_id == "speaker"
+    assert order.stock_reserved is True
+    assert order.reservation_expires_at is not None
+    assert updated_product is not None
+    assert updated_product.quantity == 9
+
 
 @pytest.mark.anyio
 async def test_checkout_stripe_error_order_failed(
@@ -208,7 +263,9 @@ async def test_checkout_stripe_error_order_failed(
     db_session: AsyncSession,
     monkeypatch: Any,
 ) -> None:
-    await add_test_product(db_session)
+    product = await add_test_product(db_session)
+
+    product_id = product.id
 
     def raise_stripe_error(**kwargs: Any) -> None:
         raise checkout_router.stripe.StripeError("Stripe rejected request")
@@ -219,13 +276,22 @@ async def test_checkout_stripe_error_order_failed(
         raise_stripe_error,
     )
 
-    response = await client.post("/checkout", json={"product_id": "speaker"})
+    response = await client.post("/checkout", json={"product_id": product_id})
 
     assert response.status_code == 502
+    assert response.json()["detail"] == "Could not create checkout session."
 
     order = (await db_session.execute(select(Order))).scalar_one()
+    updated_product = await db_session.get(Product, product_id)
+
     assert order.status == OrderStatus.checkout_failed
     assert order.stripe_session_id is None
+
+    assert updated_product is not None
+    assert updated_product.quantity == 10
+    assert order.product_id == product_id
+    assert order.stock_reserved is False
+    assert order.reservation_expires_at is not None
 
 
 @pytest.mark.anyio
@@ -234,9 +300,15 @@ async def test_checkout_without_url(
     db_session: AsyncSession,
     monkeypatch: Any,
 ) -> None:
-    await add_test_product(db_session)
+    product = await add_test_product(db_session)
 
-    fake_session = SimpleNamespace(id="test_1", url=None, livemode=False)
+    product_id = product.id
+
+    fake_session = SimpleNamespace(
+        id="test_1",
+        url=None,
+        livemode=False,
+    )
 
     monkeypatch.setattr(
         checkout_router.stripe.checkout.Session,
@@ -244,13 +316,22 @@ async def test_checkout_without_url(
         lambda **kwargs: fake_session,
     )
 
-    response = await client.post("/checkout", json={"product_id": "speaker"})
+    response = await client.post("/checkout", json={"product_id": product_id})
 
     assert response.status_code == 502
+    assert response.json()["detail"] == "Stripe checkout session did not include a URL"
 
     order = (await db_session.execute(select(Order))).scalar_one()
+    updated_product = await db_session.get(Product, product_id)
+
     assert order.status == OrderStatus.checkout_failed
     assert order.stripe_session_id is None
+
+    assert updated_product is not None
+    assert updated_product.quantity == 10
+    assert order.product_id == product_id
+    assert order.stock_reserved is False
+    assert order.reservation_expires_at is not None
 
 
 @pytest.mark.anyio
@@ -580,23 +661,22 @@ async def test_webhook_marks_order_paid_and_fulfilled(
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
         "construct_event",
-        lambda payload, sig_header, secret: SimpleNamespace(
-            id="evt_test_paid",
-            type="checkout.session.completed",
-            data=SimpleNamespace(
-                object=SimpleNamespace(
-                    id="cs_test_123",
-                    payment_status="paid",
-                    client_reference_id=str(order_id),
-                    metadata={"product_id": product_id},
-                    amount_total=product_price,
-                    currency=product_currency.lower(),
-                    livemode=False,
-                    payment_intent="pi_test_123",
-                )
-            ),
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_test_paid",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product_price,
+            currency=product_currency.lower(),
+            session_id="cs_test_123",
+            payment_intent="pi_test_123",
         ),
     )
+
+    assert order.stripe_session_id == "cs_test_123"
+    assert order.product_id == product_id
+    assert order.amount == product_price
+    assert order.currency.lower() == product_currency.lower()
+    assert order.livemode is False
 
     response = await client.post(
         "/webhooks/stripe",
@@ -802,6 +882,180 @@ async def test_webhook_missing_order_returns_200(
 
 
 @pytest.mark.anyio
+async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    product.quantity = 1
+
+    order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_late_with_stock",
+        amount=product.price,
+        currency=product.currency,
+        livemode=False,
+        reservation_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        stock_reserved=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    order_id = order.id
+    product_id = product.id
+    product_price = product.price
+    product_currency = product.currency
+
+    await db_session.rollback()
+
+    delivered_orders = []
+
+    async def fake_deliver_product(order_id: int) -> None:
+        delivered_orders.append(order_id)
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        webhooks_router.fulfillment_service,
+        "deliver_product",
+        fake_deliver_product,
+    )
+    monkeypatch.setattr(
+        webhooks_router,
+        "standalone_session",
+        fake_standalone_session,
+    )
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_test_late_with_stock",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product_price,
+            currency=product_currency.lower(),
+            session_id="cs_test_late_with_stock",
+            payment_intent="pi_test_late_with_stock",
+        ),
+    )
+
+    assert order.stripe_session_id == "cs_test_late_with_stock"
+    assert order.product_id == product_id
+    assert order.amount == product_price
+    assert order.currency.lower() == product_currency.lower()
+    assert order.livemode is False
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+
+    db_session.expire_all()
+
+    updated_order = await db_session.get(Order, order_id)
+    updated_product = await db_session.get(Product, product_id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.paid
+    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
+    assert updated_order.fulfilled_at is not None
+    assert updated_order.stock_reserved is False
+    assert updated_order.stripe_payment_intent == "pi_test_late_with_stock"
+
+    assert updated_product is not None
+    assert updated_product.quantity == 0
+
+    assert delivered_orders == [order_id]
+
+
+@pytest.mark.anyio
+async def test_webhook_late_payment_without_stock_goes_to_payment_review(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    product.quantity = 0
+
+    order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_late_no_stock",
+        amount=product.price,
+        currency=product.currency,
+        livemode=False,
+        reservation_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        stock_reserved=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    order_id = order.id
+    product_id = product.id
+    product_price = product.price
+    product_currency = product.currency
+
+    await db_session.rollback()
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_test_late_no_stock",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product_price,
+            currency=product_currency.lower(),
+            session_id="cs_test_late_no_stock",
+            payment_intent="pi_test_late_no_stock",
+        ),
+    )
+
+    assert order.stripe_session_id == "cs_test_late_no_stock"
+    assert order.product_id == product_id
+    assert order.amount == product_price
+    assert order.currency.lower() == product_currency.lower()
+    assert order.livemode is False
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+
+    db_session.expire_all()
+
+    updated_order = await db_session.get(Order, order_id)
+    updated_product = await db_session.get(Product, product_id)
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.paid
+    assert updated_order.fulfillment_status == FulfillmentStatus.payment_review
+    assert updated_order.fulfilled_at is None
+    assert updated_order.stock_reserved is False
+    assert updated_order.stripe_payment_intent == "pi_test_late_no_stock"
+
+    assert updated_product is not None
+    assert updated_product.quantity == 0
+
+
+@pytest.mark.anyio
 async def test_fulfillment_failure_leaves_order_pending(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -985,4 +1239,415 @@ async def test_concurrent_identical_fulfillments_deliver_once(
     assert updated_order is not None
     assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
     assert updated_order.fulfilled_at is not None
+    assert delivered_orders == [order_id]
+
+
+@pytest.mark.anyio
+async def test_webhook_invalid_payload_returns_400(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    def raise_value_error(payload: bytes, sig_header: str, secret: str) -> None:
+        raise ValueError("invalid payload")
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        raise_value_error,
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"not-json",
+        headers={"Stripe-Signature": "test"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid webhook payload."
+
+
+@pytest.mark.anyio
+async def test_webhook_missing_metadata_returns_200(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_missing_metadata",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    id="cs_test",
+                    payment_status="paid",
+                    client_reference_id=None,
+                    metadata={},
+                    amount_total=4999,
+                    currency="usd",
+                    livemode=False,
+                    payment_intent="pi_test",
+                )
+            ),
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_webhook_malformed_order_id_returns_200(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: SimpleNamespace(
+            id="evt_bad_order_id",
+            type="checkout.session.completed",
+            data=SimpleNamespace(
+                object=SimpleNamespace(
+                    id="cs_test",
+                    payment_status="paid",
+                    client_reference_id="not-an-int",
+                    metadata={"product_id": "speaker"},
+                    amount_total=4999,
+                    currency="usd",
+                    livemode=False,
+                    payment_intent="pi_test",
+                )
+            ),
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_run_fulfillment_marks_order_fulfilled(
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    order_id = order.id
+    await db_session.rollback()
+
+    delivered_orders = []
+
+    async def fake_deliver_product(order_id: int) -> None:
+        delivered_orders.append(order_id)
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        webhooks_router.fulfillment_service,
+        "deliver_product",
+        fake_deliver_product,
+    )
+    monkeypatch.setattr(
+        webhooks_router,
+        "standalone_session",
+        fake_standalone_session,
+    )
+
+    await webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test")
+
+    db_session.expire_all()
+
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
+    assert updated_order.fulfilled_at is not None
+    assert delivered_orders == [order_id]
+
+
+@pytest.mark.anyio
+async def test_run_fulfillment_does_nothing_when_not_pending(
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.fulfillment_status = FulfillmentStatus.fulfilled
+    await db_session.commit()
+
+    order_id = order.id
+    await db_session.rollback()
+
+    delivered_orders = []
+
+    async def fake_deliver_product(order_id: int) -> None:
+        delivered_orders.append(order_id)
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        webhooks_router.fulfillment_service,
+        "deliver_product",
+        fake_deliver_product,
+    )
+    monkeypatch.setattr(
+        webhooks_router,
+        "standalone_session",
+        fake_standalone_session,
+    )
+
+    await webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test")
+
+    assert delivered_orders == []
+
+
+@pytest.mark.anyio
+async def test_release_expired_reservations_restores_stock(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    product.quantity = 0
+
+    order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_expired_direct",
+        amount=product.price,
+        currency=product.currency,
+        livemode=False,
+        reservation_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        stock_reserved=True,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    await checkout_router.release_expired_reservations(db_session)
+
+    await db_session.refresh(order)
+    await db_session.refresh(product)
+
+    assert order.status == OrderStatus.checkout_failed
+    assert order.stock_reserved is False
+    assert product.quantity == 1
+
+
+@pytest.mark.anyio
+async def test_concurrent_checkouts_do_not_double_release_expired_reservation(
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with test_sessionmaker() as setup_db:
+        product = Product(
+            id="speaker",
+            name="Portable Speaker",
+            price=4999,
+            currency="USD",
+            description="A waterproof Bluetooth speaker.",
+            quantity=0,
+            is_deleted=False,
+        )
+        setup_db.add(product)
+        await setup_db.commit()
+
+        order = Order(
+            product_id=product.id,
+            stripe_session_id="cs_test_expired",
+            amount=product.price,
+            currency=product.currency,
+            livemode=False,
+            status=OrderStatus.pending,
+            fulfillment_status=FulfillmentStatus.pending,
+            stock_reserved=True,
+            reservation_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+        setup_db.add(order)
+        await setup_db.commit()
+
+        order_id = order.id
+
+    async def release_once() -> None:
+        async with test_sessionmaker() as db:
+            await release_expired_reservations(db)
+
+    await asyncio.gather(
+        release_once(),
+        release_once(),
+    )
+
+    async with test_sessionmaker() as verify_db:
+        updated_product = await verify_db.get(Product, "speaker")
+        updated_order = await verify_db.get(Order, order_id)
+
+        assert updated_product is not None
+        assert updated_order is not None
+        assert updated_product.quantity == 1
+        assert updated_order.status == OrderStatus.checkout_failed
+        assert updated_order.stock_reserved is False
+
+
+@pytest.mark.anyio
+async def test_restore_reserved_stock_restores_quantity(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    product.quantity = 9
+
+    order = Order(
+        product_id=product.id,
+        stripe_session_id=None,
+        amount=product.price,
+        currency=product.currency,
+        livemode=False,
+        reservation_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        stock_reserved=True,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    await checkout_router.restore_reserved_stock(db_session, order, product.id)
+
+    await db_session.refresh(order)
+    await db_session.refresh(product)
+
+    assert order.status == OrderStatus.checkout_failed
+    assert order.stock_reserved is False
+    assert product.quantity == 10
+
+
+@pytest.mark.anyio
+async def test_fulfillment_service_deliver_product_stub() -> None:
+    await fulfillment_service.deliver_product(123)
+
+
+@pytest.mark.anyio
+async def test_list_products_returns_active_products(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    products = await list_products(db_session)
+
+    assert len(products) == 1
+    assert products[0].id == product.id
+
+
+@pytest.mark.anyio
+async def test_orders_empty_list_with_valid_api_key(client: AsyncClient) -> None:
+    response = await client.get(
+        "/orders",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.anyio
+async def test_stripe_webhook_directly_covers_paid_transaction(
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    order_id = order.id
+    product_id = product.id
+    product_price = product.price
+    product_currency = product.currency
+
+    await db_session.rollback()
+
+    class FakeRequest:
+        async def body(self) -> bytes:
+            return b"{}"
+
+    delivered_orders = []
+
+    async def fake_deliver_product(order_id: int) -> None:
+        delivered_orders.append(order_id)
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        webhooks_router.fulfillment_service,
+        "deliver_product",
+        fake_deliver_product,
+    )
+    monkeypatch.setattr(
+        webhooks_router,
+        "standalone_session",
+        fake_standalone_session,
+    )
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_direct_paid",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product_price,
+            currency=product_currency.lower(),
+            session_id="cs_test_123",
+            payment_intent="pi_direct_paid",
+        ),
+    )
+
+    background_tasks = BackgroundTasks()
+
+    response = await webhooks_router.stripe_webhook(
+        request=FakeRequest(),
+        db=db_session,
+        background_tasks=background_tasks,
+        sig_header="test-signature",
+    )
+
+    await background_tasks()
+
+    db_session.expire_all()
+    updated_order = await db_session.get(Order, order_id)
+
+    assert response == {"received": True}
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.paid
+    assert updated_order.stripe_payment_intent == "pi_direct_paid"
+    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
     assert delivered_orders == [order_id]

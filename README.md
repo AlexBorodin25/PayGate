@@ -2,25 +2,34 @@
 
 PayGate is a small FastAPI application that sells a small catalogue of digital products through Stripe Checkout.
 
+It demonstrates server-side pricing, hosted checkout, verified webhook payment confirmation, async fulfillment, 
+protected order visibility, Postgres persistence, Alembic migrations, Docker packaging, and CI quality gates
+
 # Features
 
-- List available products with name, description, price, currency, and quantity
-- Create Stripe Checkout Sessions from a server-side product id
-- Store pending orders before redirecting to Stripe Checkout
-- Verify Stripe webhook signatures before changing payment state
-- Mark orders as paid only from verified `checkout.session.completed` events
-- Prevent deleted products from appearing in the public product list
-- Prevent checkout for deleted or out-of-stock products
-- Reserve stock atomically before checkout
-- Use Alembic migrations for database schema changes
-- Load configuration from environment variables
-- Run linting, formatting, type checks, and tests
+Product catalogue with name, description, price, currency, and stock quantity
+Stripe Checkout Session creation from a server-side product id
+Server-authoritative pricing; the browser never submits a trusted price
+Verified Stripe webhook payment confirmation
+Payment reconciliation using session id, amount, currency, and livemode
+Duplicate webhook protection with recorded Stripe event ids
+Race-safe fulfillment claim
+Protected order status endpoint
+Alembic-managed Postgres schema
+Dockerized runtime with a non-root user
+GitHub Actions quality pipeline
 
-To run the app use "uvicorn app.main:app --reload"
+
+URL:
+https://paygate-b2ll.onrender.com/
+
+To run the app locally use "uvicorn app.main:app --reload"
 
 Can open:
-http://localhost:8000/health
+http://localhost:8000
 http://localhost:8000/products
+http://localhost:8000/docs
+http://localhost:8000/health
 
 
 To run a manual checkout test use:
@@ -38,5 +47,9 @@ Use card 4242 4242 4242 4242.
 
 To view /orders use:
 Invoke-RestMethod `
-  -Uri "https://your-app.onrender.com/orders" `
+  -Uri "https://paygate-b2ll.onrender.com/orders" `
   -Headers @{ "X-API-Key" = "your-secret-key" }
+
+To test failed checkout:
+
+Temporarily set an invalid Stripe secret key in '.env' or click back/cancel on the Stripe checkout page.
