@@ -11,6 +11,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app import background_tasks
 from app.models import FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
 from app.routers import products as products_router
@@ -649,12 +650,12 @@ async def test_webhook_marks_order_paid_and_fulfilled(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router.fulfillment_service,
+        background_tasks.fulfillment_service,
         "deliver_product",
         fake_deliver_product,
     )
     monkeypatch.setattr(
-        webhooks_router,
+        background_tasks,
         "standalone_session",
         fake_standalone_session,
     )
@@ -927,12 +928,12 @@ async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router.fulfillment_service,
+        background_tasks.fulfillment_service,
         "deliver_product",
         fake_deliver_product,
     )
     monkeypatch.setattr(
-        webhooks_router,
+        background_tasks,
         "standalone_session",
         fake_standalone_session,
     )
@@ -1086,12 +1087,12 @@ async def test_fulfillment_failure_leaves_order_pending(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router.fulfillment_service,
+        background_tasks.fulfillment_service,
         "deliver_product",
         fail_delivery,
     )
     monkeypatch.setattr(
-        webhooks_router,
+        background_tasks,
         "standalone_session",
         fake_standalone_session,
     )
@@ -1222,15 +1223,19 @@ async def test_concurrent_identical_fulfillments_deliver_once(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router.fulfillment_service,
+        background_tasks.fulfillment_service,
         "deliver_product",
         fake_deliver_product,
     )
-    monkeypatch.setattr(webhooks_router, "standalone_session", fake_standalone_session)
+    monkeypatch.setattr(
+        background_tasks,
+        "standalone_session",
+        fake_standalone_session,
+    )
 
     await asyncio.gather(
-        webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test_1"),
-        webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test_1"),
+        background_tasks.run_fulfillment(order_id, "cs_test_123", "evt_test_1"),
+        background_tasks.run_fulfillment(order_id, "cs_test_123", "evt_test_1"),
     )
 
     db_session.expire_all()
@@ -1364,17 +1369,17 @@ async def test_run_fulfillment_marks_order_fulfilled(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router.fulfillment_service,
+        background_tasks.fulfillment_service,
         "deliver_product",
         fake_deliver_product,
     )
     monkeypatch.setattr(
-        webhooks_router,
+        background_tasks,
         "standalone_session",
         fake_standalone_session,
     )
 
-    await webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test")
+    await background_tasks.run_fulfillment(order_id, "cs_test_123", "evt_test")
 
     db_session.expire_all()
 
@@ -1416,17 +1421,17 @@ async def test_run_fulfillment_does_nothing_when_not_pending(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router.fulfillment_service,
+        background_tasks.fulfillment_service,
         "deliver_product",
         fake_deliver_product,
     )
     monkeypatch.setattr(
-        webhooks_router,
+        background_tasks,
         "standalone_session",
         fake_standalone_session,
     )
 
-    await webhooks_router.run_fulfillment(order_id, "cs_test_123", "evt_test")
+    await background_tasks.run_fulfillment(order_id, "cs_test_123", "evt_test")
 
     assert delivered_orders == []
 
@@ -1608,14 +1613,14 @@ async def test_stripe_webhook_directly_covers_paid_transaction(
                 raise
 
     monkeypatch.setattr(
-        webhooks_router.fulfillment_service,
+        fulfillment_service,
         "deliver_product",
         fake_deliver_product,
     )
     monkeypatch.setattr(
-        webhooks_router,
-        "standalone_session",
-        fake_standalone_session,
+        fulfillment_service,
+        "deliver_product",
+        fake_deliver_product,
     )
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
