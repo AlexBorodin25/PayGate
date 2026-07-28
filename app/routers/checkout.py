@@ -40,18 +40,30 @@ async def release_expired_reservations(db: AsyncSession) -> None:
         .all()
     )
 
-    if not expired_orders:
-        return
-
     for order in expired_orders:
+        release_update = cast(
+            CursorResult[Any],
+            await db.execute(
+                update(Order)
+                .where(Order.id == order.id)
+                .where(Order.status == OrderStatus.pending)
+                .where(Order.stock_reserved.is_(True))
+                .where(Order.reservation_expires_at <= now)
+                .values(
+                    status=OrderStatus.checkout_failed,
+                    stock_reserved=False,
+                )
+            ),
+        )
+
+        if release_update.rowcount != 1:
+            continue
+
         await db.execute(
             update(Product)
             .where(Product.id == order.product_id)
             .values(quantity=Product.quantity + 1)
         )
-
-        order.stock_reserved = False
-        order.status = OrderStatus.checkout_failed
 
     await db.commit()
 
@@ -61,15 +73,26 @@ async def restore_reserved_stock(
     order: Order,
     product_id: str,
 ) -> None:
-    if order.stock_reserved:
+    release_update = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(Order)
+            .where(Order.id == order.id)
+            .where(Order.stock_reserved.is_(True))
+            .values(
+                status=OrderStatus.checkout_failed,
+                stock_reserved=False,
+            )
+        ),
+    )
+
+    if release_update.rowcount == 1:
         await db.execute(
             update(Product)
             .where(Product.id == product_id)
             .values(quantity=Product.quantity + 1)
         )
-        order.stock_reserved = False
 
-    order.status = OrderStatus.checkout_failed
     await db.commit()
 
 

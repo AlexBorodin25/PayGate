@@ -279,7 +279,11 @@ async def stripe_webhook(
                 await db.execute(
                     update(Order)
                     .where(Order.id == parsed_order_id)
-                    .where(Order.status == OrderStatus.pending)
+                    .where(
+                        Order.status.in_(
+                            [OrderStatus.pending, OrderStatus.checkout_failed]
+                        )
+                    )
                     .values(
                         status=OrderStatus.paid,
                         stock_reserved=False,
@@ -322,6 +326,7 @@ async def stripe_webhook(
                 and order.status == OrderStatus.paid
                 and order.fulfillment_status == FulfillmentStatus.pending
             )
+
     except SQLAlchemyError as error:
         logger.exception("Transient database error while processing Stripe webhook.")
         raise HTTPException(
