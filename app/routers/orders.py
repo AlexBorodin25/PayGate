@@ -1,12 +1,13 @@
+from math import ceil
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.models import Order
-from app.schemas import OrderResponse
+from app.models import FulfillmentStatus, Order, OrderStatus
+from app.schemas import OrderListResponse
 from app.security import require_orders_api_key
 
 router = APIRouter(tags=["Orders"])
@@ -17,11 +18,11 @@ RequireOrdersApiKey = Annotated[None, Depends(require_orders_api_key)]
 
 @router.get(
     "/orders",
-    response_model=list[OrderResponse],
+    response_model=OrderListResponse,
     summary="List orders",
     description=(
-        "Protected operator endpoint. Lists orders with payment status, "
-        "fulfillment status, and fulfilled_at so stuck orders are visible."
+        "Protected operator endpoint. Returns paginated orders with optional "
+        "status, fulfillment_status, and product_id filters."
     ),
     responses={
         200: {"description": "Orders returned"},
@@ -31,6 +32,47 @@ RequireOrdersApiKey = Annotated[None, Depends(require_orders_api_key)]
 async def list_orders(
     db: DatabaseSession,
     _: RequireOrdersApiKey,
-) -> list[Order]:
-    result = await db.scalars(select(Order).order_by(Order.created_at.desc()))
-    return list(result)
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 25,
+    status: OrderStatus | None = None,
+    fulfillment_status: FulfillmentStatus | None = None,
+    product_id: str | None = None,
+) -> OrderListResponse:
+    filters = []
+
+    if status is not None:
+        filters.append(Order.status == status)
+
+    if fulfillment_status is not None:
+        filters.append(Order.fulfillment_status == fulfillment_status)
+
+    if product_id is not None:
+        filters.append(Order.product_id == product_id)
+
+    total = await db.scalar(
+        select(func.count()).select_from(Order).where(*filters)
+    )
+    total = total or 0
+
+    total_pages = ceil(total / page_size) if total else 0
+    offset = (page - 1) * page_size
+
+    orders = (
+        await db.scalars(
+            select(Order)
+            .where(*filters)
+            .order_by(Order.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
+        )
+    ).all()
+
+    return OrderListResponse(
+        items=list(orders),
+        page=page,
+        page_size=page_size,
+        total=total,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+        has_previous=page > 1,
+    )
