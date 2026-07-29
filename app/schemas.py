@@ -40,8 +40,9 @@ class OrderResponse(BaseModel):
     fulfilled_at: datetime | None
     created_at: datetime
 
+
 class OrderListResponse(BaseModel):
-    items: List[OrderResponse]
+    items: list[OrderResponse]
     page: int
     page_size: int
     total: int

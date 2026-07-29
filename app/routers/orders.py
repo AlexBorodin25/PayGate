@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models import FulfillmentStatus, Order, OrderStatus
-from app.schemas import OrderListResponse
+from app.schemas import OrderListResponse, OrderResponse
 from app.security import require_orders_api_key
 
 router = APIRouter(tags=["Orders"])
@@ -49,9 +49,7 @@ async def list_orders(
     if product_id is not None:
         filters.append(Order.product_id == product_id)
 
-    total = await db.scalar(
-        select(func.count()).select_from(Order).where(*filters)
-    )
+    total = await db.scalar(select(func.count()).select_from(Order).where(*filters))
     total = total or 0
 
     total_pages = ceil(total / page_size) if total else 0
@@ -68,7 +66,7 @@ async def list_orders(
     ).all()
 
     return OrderListResponse(
-        items=list(orders),
+        items=[OrderResponse.model_validate(order) for order in orders],
         page=page,
         page_size=page_size,
         total=total,
