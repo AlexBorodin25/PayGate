@@ -173,7 +173,7 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
                 }
             ],
             idempotency_key=f"checkout-order-{order.id}",
-            success_url=f"{settings.app_base_url}/success?order_id={order.id}",
+            success_url=f"{settings.app_base_url}/success?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{settings.app_base_url}/cancel",
         )
 
@@ -219,12 +219,12 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
 )
 async def success(
     request: Request,
-    order_id: int | None = None,
+    session_id: str | None = None,
 ) -> Response:
     return templates.TemplateResponse(
         request=request,
         name="success.html",
-        context={"order_id": order_id},
+        context={"session_id": session_id},
     )
 
 
@@ -238,12 +238,14 @@ async def cancel() -> dict[str, str]:
     return {"status": "cancelled", "message": "Checkout cancelled."}
 
 
-@router.get("/orders/{order_id}/status")
-async def order_status(
-    order_id: int,
+@router.get("/checkout-sessions/{session_id}/status")
+async def checkout_session_status(
+    session_id: str,
     db: DatabaseSession,
 ) -> dict[str, str | None]:
-    order = await db.get(Order, order_id)
+    order = (
+        await db.execute(select(Order).where(Order.stripe_session_id == session_id))
+    ).scalar_one_or_none()
 
     if order is None:
         raise HTTPException(status_code=404, detail="Order not found")

@@ -392,7 +392,9 @@ async def test_checkout_uses_app_base_url(
     )
 
     assert response.status_code == 200
-    assert captured_kwargs["success_url"].startswith("http://test/success?order_id=")
+    assert captured_kwargs["success_url"] == (
+        "http://test/success?session_id={CHECKOUT_SESSION_ID}"
+    )
     assert captured_kwargs["cancel_url"] == "http://test/cancel"
 
 
@@ -456,7 +458,7 @@ async def test_order_status_endpoint(
     product = await add_test_product(db_session)
     order = await add_test_order(db_session, product)
 
-    response = await client.get(f"/orders/{order.id}/status")
+    response = await client.get(f"/checkout-sessions/{order.stripe_session_id}/status")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -470,7 +472,7 @@ async def test_order_status_endpoint(
 async def test_order_status_unknown_order(
     client: AsyncClient,
 ) -> None:
-    response = await client.get("/orders/999999/status")
+    response = await client.get("/checkout-sessions/cs_missing/status")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Order not found"

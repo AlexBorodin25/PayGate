@@ -34,18 +34,27 @@
 </footer>
 
 <script>
-    const orderId = "{{ order_id or '' }}";
+    const sessionId = "{{ session_id or '' }}";
     const title = document.getElementById("status-title");
     const message = document.getElementById("status-message");
+    let poller = null;
+
+    function stopPolling() {
+        if (poller !== null) {
+            clearInterval(poller);
+            poller = null;
+        }
+    }
 
     async function refreshOrderStatus() {
-        if (!orderId) {
+        if (!sessionId) {
             title.textContent = "Checkout returned";
-            message.textContent = "No order id was provided.";
+            message.textContent = "No checkout session id was provided.";
+            stopPolling();
             return;
         }
 
-        const response = await fetch(`/orders/${orderId}/status`);
+        const response = await fetch(`/checkout-sessions/${sessionId}/status`);
 
         if (!response.ok) {
             title.textContent = "Order status unavailable";
@@ -61,6 +70,7 @@
         ) {
             title.textContent = "Payment complete";
             message.textContent = "Your order has been fulfilled.";
+            stopPolling();
             return;
         }
 
@@ -71,6 +81,15 @@
             title.textContent = "Payment received";
             message.textContent =
                 "Your payment was received, but this order needs manual review.";
+            stopPolling();
+            return;
+        }
+
+        if (order.status === "checkout_failed") {
+            title.textContent = "Checkout was not completed";
+            message.textContent =
+                "This checkout session was not completed successfully.";
+            stopPolling();
             return;
         }
 
@@ -80,20 +99,13 @@
             return;
         }
 
-        if (order.status === "checkout_failed") {
-            title.textContent = "Checkout was not completed";
-            message.textContent =
-                "This checkout session was not completed successfully.";
-            return;
-        }
-
         title.textContent = "Payment confirmation is being processed";
         message.textContent =
             "Stripe redirected you back to PayGate. Payment and fulfillment are confirmed securely in the background.";
     }
 
     refreshOrderStatus();
-    setInterval(refreshOrderStatus, 3000);
+    poller = setInterval(refreshOrderStatus, 3000);
 </script>
 </body>
 </html>

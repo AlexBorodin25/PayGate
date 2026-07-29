@@ -81,8 +81,13 @@ async def stripe_webhook(
         return {"received": True}
 
     order_id = session.client_reference_id
-    metadata = session.metadata or {}
-    product_id = metadata.get("product_id")
+    product_id = None
+
+    if session.metadata is not None:
+        if isinstance(session.metadata, dict):
+            product_id = session.metadata.get("product_id")
+        else:
+            product_id = session.metadata.product_id
 
     if order_id is None or product_id is None:
         logger.warning("Stripe webhook missing checkout metadata.")
