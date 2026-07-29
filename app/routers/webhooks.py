@@ -9,8 +9,9 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.background_tasks import run_fulfillment
 from app.config import settings
-from app.db import get_db, standalone_session
+from app.db import get_db
 from app.models import (
     FulfillmentStatus,
     Order,
@@ -18,63 +19,11 @@ from app.models import (
     ProcessedWebhookEvent,
     Product,
 )
-from app.services.fulfillment import fulfillment_service
 
 router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
-
-
-async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None:
-    try:
-        async with standalone_session() as db:
-            claim_update = cast(
-                CursorResult[Any],
-                await db.execute(
-                    update(Order)
-                    .where(Order.id == order_id)
-                    .where(Order.fulfillment_status == FulfillmentStatus.pending)
-                    .values(fulfillment_status=FulfillmentStatus.processing)
-                ),
-            )
-
-            if claim_update.rowcount != 1:
-                logger.info(
-                    "Fulfillment already claimed for order_id=%s "
-                    "session_id=%s event_id=%s",
-                    order_id,
-                    session_id,
-                    event_id,
-                )
-                return
-
-            logger.info(
-                "Fulfillment claimed for order_id=%s session_id=%s event_id=%s",
-                order_id,
-                session_id,
-                event_id,
-            )
-
-            await fulfillment_service.deliver_product(order_id)
-
-            await db.execute(
-                update(Order)
-                .where(Order.id == order_id)
-                .where(Order.fulfillment_status == FulfillmentStatus.processing)
-                .values(
-                    fulfillment_status=FulfillmentStatus.fulfilled,
-                    fulfilled_at=datetime.now(UTC),
-                )
-            )
-
-    except Exception:
-        logger.exception(
-            "Fulfillment failed for order_id=%s session_id=%s event_id=%s",
-            order_id,
-            session_id,
-            event_id,
-        )
 
 
 @router.post(
@@ -132,8 +81,13 @@ async def stripe_webhook(
         return {"received": True}
 
     order_id = session.client_reference_id
-    metadata = session.metadata or {}
-    product_id = metadata.get("product_id")
+    product_id = None
+
+    if session.metadata is not None:
+        if isinstance(session.metadata, dict):
+            product_id = session.metadata.get("product_id")
+        else:
+            product_id = session.metadata.product_id
 
     if order_id is None or product_id is None:
         logger.warning("Stripe webhook missing checkout metadata.")
