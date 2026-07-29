@@ -395,7 +395,9 @@ async def test_checkout_uses_app_base_url(
     assert captured_kwargs["success_url"] == (
         "http://test/success?session_id={CHECKOUT_SESSION_ID}"
     )
-    assert captured_kwargs["cancel_url"] == "http://test/cancel"
+    assert captured_kwargs["cancel_url"] == (
+        "http://test/cancel?session_id={CHECKOUT_SESSION_ID}"
+    )
 
 
 @pytest.mark.anyio
@@ -483,16 +485,18 @@ async def test_cancel_page_does_not_mutate(
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    response = await client.get("/cancel")
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.get(f"/cancel?session_id={order.stripe_session_id}")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "cancelled",
-        "message": "Checkout cancelled.",
-    }
+    assert "Checkout was not completed" in response.text
+    assert "PayGate" in response.text
 
-    orders = (await db_session.execute(select(Order))).scalars().all()
-    assert len(orders) == 0
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.pending
+    assert order.fulfillment_status == FulfillmentStatus.pending
 
 
 @pytest.mark.anyio

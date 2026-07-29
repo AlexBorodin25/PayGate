@@ -174,7 +174,7 @@ async def checkout(request: CheckoutRequest, db: DatabaseSession) -> CheckoutRes
             ],
             idempotency_key=f"checkout-order-{order.id}",
             success_url=f"{settings.app_base_url}/success?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{settings.app_base_url}/cancel",
+            cancel_url=f"{settings.app_base_url}/cancel?session_id={{CHECKOUT_SESSION_ID}}",
         )
 
     except stripe.APIConnectionError as error:
@@ -231,11 +231,19 @@ async def success(
 @router.get(
     "/cancel",
     summary="Checkout cancellation landing endpoint",
-    description="Landing endpoint after checkout is cancelled. "
-    "Does not mutate order state.",
+    description=(
+        "Landing endpoint after checkout is cancelled. Does not mutate order state."
+    ),
 )
-async def cancel() -> dict[str, str]:
-    return {"status": "cancelled", "message": "Checkout cancelled."}
+async def cancel(
+    request: Request,
+    session_id: str | None = None,
+) -> Response:
+    return templates.TemplateResponse(
+        request=request,
+        name="cancel.html",
+        context={"session_id": session_id},
+    )
 
 
 @router.get("/checkout-sessions/{session_id}/status")
