@@ -1837,3 +1837,15 @@ async def test_orders_large_page_number_returns_empty_page(
     assert data["total_pages"] == 1
     assert data["has_next"] is False
     assert data["has_previous"] is True
+
+
+@pytest.mark.anyio
+async def test_orders_rejects_too_large_page_size(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(
+        "/orders?page=1&page_size=100500",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 422
