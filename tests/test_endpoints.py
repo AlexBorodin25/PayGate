@@ -1859,3 +1859,80 @@ async def test_orders_ui_page_loads(client: AsyncClient) -> None:
     assert "Orders" in response.text
     assert 'id="api-key"' in response.text
     assert "/orders?" in response.text
+    assert 'class="table-sort"' in response.text
+    assert 'data-sort="amount"' in response.text
+    assert 'data-indicator="created_at"' in response.text
+
+
+@pytest.mark.anyio
+async def test_orders_support_sorting(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    cheap_order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_sort_cheap",
+        amount=1000,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.fulfilled,
+        livemode=False,
+    )
+    expensive_order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_sort_expensive",
+        amount=9999,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.fulfilled,
+        livemode=False,
+    )
+
+    db_session.add_all([cheap_order, expensive_order])
+    await db_session.commit()
+
+    asc_response = await client.get(
+        "/orders?sort_by=amount&sort_direction=asc",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert asc_response.status_code == 200
+
+    asc_items = asc_response.json()["items"]
+
+    assert asc_items[0]["amount"] == 1000
+    assert asc_items[1]["amount"] == 9999
+
+    desc_response = await client.get(
+        "/orders?sort_by=amount&sort_direction=desc",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert desc_response.status_code == 200
+
+    desc_items = desc_response.json()["items"]
+
+    assert desc_items[0]["amount"] == 9999
+    assert desc_items[1]["amount"] == 1000
+
+
+@pytest.mark.anyio
+async def test_orders_reject_invalid_sort(client: AsyncClient) -> None:
+    response = await client.get(
+        "/orders?sort_by=stripe_payment_intent",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_orders_reject_invalid_sort_direction(client: AsyncClient) -> None:
+    response = await client.get(
+        "/orders?sort_direction=sideways",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 422
