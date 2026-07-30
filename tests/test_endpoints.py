@@ -1799,3 +1799,41 @@ async def test_stripe_webhook_directly_covers_paid_transaction(
     assert updated_order.stripe_payment_intent == "pi_direct_paid"
     assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
     assert delivered_orders == [order_id]
+
+
+@pytest.mark.anyio
+async def test_orders_large_page_number_returns_empty_page(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_large_page",
+        amount=4999,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.fulfilled,
+        livemode=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    response = await client.get(
+        "/orders?page=100500&page_size=25",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["items"] == []
+    assert data["page"] == 100500
+    assert data["page_size"] == 25
+    assert data["total"] == 1
+    assert data["total_pages"] == 1
+    assert data["has_next"] is False
+    assert data["has_previous"] is True

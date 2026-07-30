@@ -59,7 +59,7 @@ async def list_orders(
         await db.scalars(
             select(Order)
             .where(*filters)
-            .order_by(Order.created_at.desc())
+            .order_by(Order.created_at.desc(), Order.id.desc())
             .offset(offset)
             .limit(page_size)
         )
