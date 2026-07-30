@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Orders</title>
+    <title>Orders | PayGate</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header class = "site-header">
+<header class="site-header">
     <div class="header-inner">
         <h1 class="logo">PayGate</h1>
         <nav class="nav-space" aria-label="Main navigation">
@@ -113,9 +113,26 @@
         return `status-badge status-${value.replace("_", "-")}`;
     }
 
+    function appendCell(row, value) {
+        const cell = document.createElement("td");
+        cell.textContent = value || "";
+        row.appendChild(cell);
+    }
+
+    function appendStatusCell(row, value) {
+        const cell = document.createElement("td");
+        const badge = document.createElement("span");
+
+        badge.className = statusClass(value);
+        badge.textContent = value;
+
+        cell.appendChild(badge);
+        row.appendChild(cell);
+    }
+
     function setEmptyState(message) {
         ordersSummary.textContent = message;
-        ordersBody.innerHTML = "";
+        ordersBody.textContent = "";
         previousButton.disabled = true;
         nextButton.disabled = true;
     }
@@ -145,51 +162,54 @@
             params.set("product_id", productFilter.value.trim());
         }
 
-        const response = await fetch(`/orders?${params.toString()}`, {
-            headers: {
-                "X-API-Key": apiKey,
-            },
-        });
+        try {
+            const response = await fetch(`/orders?${params.toString()}`, {
+                headers: {
+                    "X-API-Key": apiKey,
+                },
+            });
 
-        if (response.status === 401) {
-            setEmptyState("The API key is missing or invalid.");
-            return;
-        }
+            if (response.status === 401) {
+                setEmptyState("The API key is missing or invalid.");
+                return;
+            }
 
-        if (!response.ok) {
-            setEmptyState("Could not load orders.");
-            return;
-        }
+            if (!response.ok) {
+                setEmptyState(`Could not load orders. Status: ${response.status}`);
+                return;
+            }
 
-        const data = await response.json();
+            const data = await response.json();
 
-        hasNext = data.has_next;
-        page = data.page;
+            hasNext = data.has_next;
+            page = data.page;
 
-        ordersSummary.textContent =
-            `${data.total} orders found. Showing page ${data.page} of ${data.total_pages || 1}.`;
+            ordersSummary.textContent =
+                `${data.total} orders found. Showing page ${data.page} of ${data.total_pages || 1}.`;
 
-        pageLabel.textContent = `Page ${data.page}`;
-        previousButton.disabled = !data.has_previous;
-        nextButton.disabled = !data.has_next;
+            pageLabel.textContent = `Page ${data.page}`;
+            previousButton.disabled = !data.has_previous;
+            nextButton.disabled = !data.has_next;
 
-        ordersBody.innerHTML = "";
+            ordersBody.textContent = "";
 
-        for (const order of data.items) {
-            const row = document.createElement("tr");
+            for (const order of data.items) {
+                const row = document.createElement("tr");
 
-            row.innerHTML = `
-                <td>${order.id}</td>
-                <td>${order.product_id || ""}</td>
-                <td>${formatAmount(order.amount, order.currency)}</td>
-                <td><span class="${statusClass(order.status)}">${order.status}</span></td>
-                <td><span class="${statusClass(order.fulfillment_status)}">${order.fulfillment_status}</span></td>
-                <td>${order.stripe_payment_intent || ""}</td>
-                <td>${formatDate(order.fulfilled_at)}</td>
-                <td>${formatDate(order.created_at)}</td>
-            `;
+                appendCell(row, String(order.id));
+                appendCell(row, order.product_id);
+                appendCell(row, formatAmount(order.amount, order.currency));
+                appendStatusCell(row, order.status);
+                appendStatusCell(row, order.fulfillment_status);
+                appendCell(row, order.stripe_payment_intent);
+                appendCell(row, formatDate(order.fulfilled_at));
+                appendCell(row, formatDate(order.created_at));
 
-            ordersBody.appendChild(row);
+                ordersBody.appendChild(row);
+            }
+        } catch (error) {
+            console.error(error);
+            setEmptyState("Could not connect to the orders API.");
         }
     }
 

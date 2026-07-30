@@ -1,3 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Checkout Cancelled | PayGate</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+    <div class="header-inner">
+        <h1 class="logo">PayGate</h1>
+        <nav class="nav-space" aria-label="Main navigation">
+            <a href="/">Products</a>
+            <a href="/orders-ui">Orders</a>
+        </nav>
+    </div>
+</header>
+
+<main>
+    <section class="status-panel">
+        <p class="status-eyebrow">Checkout cancelled</p>
+        <h2 id="status-title">Checkout was not completed</h2>
+        <p id="status-message">
+            You returned from Stripe before completing payment. If no payment is
+            confirmed, the reserved stock will be released automatically.
+        </p>
+
+        <a class="link-button" href="/">Back to products</a>
+    </section>
+</main>
+
+<footer class="site-footer">
+    <div class="footer-inner">
+        PayGate checkout demo. Use card number 4242 4242 4242 4242 at checkout.
+    </div>
+</footer>
+
 <script>
     const sessionId = "{{ session_id or '' }}";
     const title = document.getElementById("status-title");
@@ -83,3 +121,5 @@
     refreshOrderStatus();
     poller = setInterval(refreshOrderStatus, 3000);
 </script>
+</body>
+</html>

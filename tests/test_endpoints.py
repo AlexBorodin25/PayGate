@@ -1849,3 +1849,13 @@ async def test_orders_rejects_too_large_page_size(
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_orders_ui_page_loads(client: AsyncClient) -> None:
+    response = await client.get("/orders-ui")
+
+    assert response.status_code == 200
+    assert "Orders" in response.text
+    assert 'id="api-key"' in response.text
+    assert "/orders?" in response.text
