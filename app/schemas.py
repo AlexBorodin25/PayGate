@@ -30,6 +30,7 @@ class OrderResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    product_id: str | None
     stripe_session_id: str | None
     stripe_payment_intent: str | None
     amount: int
@@ -38,3 +39,13 @@ class OrderResponse(BaseModel):
     fulfillment_status: FulfillmentStatus
     fulfilled_at: datetime | None
     created_at: datetime
+
+
+class OrderListResponse(BaseModel):
+    items: list[OrderResponse]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool

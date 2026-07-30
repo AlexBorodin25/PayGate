@@ -395,7 +395,9 @@ async def test_checkout_uses_app_base_url(
     assert captured_kwargs["success_url"] == (
         "http://test/success?session_id={CHECKOUT_SESSION_ID}"
     )
-    assert captured_kwargs["cancel_url"] == "http://test/cancel"
+    assert captured_kwargs["cancel_url"] == (
+        "http://test/cancel?session_id={CHECKOUT_SESSION_ID}"
+    )
 
 
 @pytest.mark.anyio
@@ -483,16 +485,18 @@ async def test_cancel_page_does_not_mutate(
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    response = await client.get("/cancel")
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.get(f"/cancel?session_id={order.stripe_session_id}")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "cancelled",
-        "message": "Checkout cancelled.",
-    }
+    assert "Checkout was not completed" in response.text
+    assert "PayGate" in response.text
 
-    orders = (await db_session.execute(select(Order))).scalars().all()
-    assert len(orders) == 0
+    await db_session.refresh(order)
+    assert order.status == OrderStatus.pending
+    assert order.fulfillment_status == FulfillmentStatus.pending
 
 
 @pytest.mark.anyio
@@ -1190,7 +1194,10 @@ async def test_orders_lists_status(
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
+    product = await add_test_product(db_session)
+
     order = Order(
+        product_id=product.id,
         stripe_session_id="cs_test_orders",
         stripe_payment_intent="pi_test_orders",
         amount=4999,
@@ -1213,10 +1220,19 @@ async def test_orders_lists_status(
 
     assert response.status_code == 200
 
-    orders = response.json()
+    data = response.json()
+    orders = data["items"]
+
+    assert data["page"] == 1
+    assert data["page_size"] == 25
+    assert data["total"] == 1
+    assert data["total_pages"] == 1
+    assert data["has_next"] is False
+    assert data["has_previous"] is False
 
     assert len(orders) == 1
     assert orders[0]["id"] == order_id
+    assert orders[0]["product_id"] == "speaker"
     assert orders[0]["stripe_session_id"] == "cs_test_orders"
     assert orders[0]["stripe_payment_intent"] == "pi_test_orders"
     assert orders[0]["amount"] == 4999
@@ -1606,7 +1622,102 @@ async def test_orders_empty_list_with_valid_api_key(client: AsyncClient) -> None
     )
 
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json() == {
+        "items": [],
+        "page": 1,
+        "page_size": 25,
+        "total": 0,
+        "total_pages": 0,
+        "has_next": False,
+        "has_previous": False,
+    }
+
+
+@pytest.mark.anyio
+async def test_orders_support_pagination_and_filters(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    first_paid_order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_paid_1",
+        amount=4999,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.fulfilled,
+        livemode=False,
+    )
+    second_paid_order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_paid_2",
+        amount=4999,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.fulfilled,
+        livemode=False,
+    )
+    pending_order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_pending",
+        amount=4999,
+        currency="USD",
+        status=OrderStatus.pending,
+        fulfillment_status=FulfillmentStatus.pending,
+        livemode=False,
+    )
+
+    db_session.add_all([first_paid_order, second_paid_order, pending_order])
+    await db_session.commit()
+
+    response = await client.get(
+        (
+            "/orders?page=1&page_size=1"
+            "&status=paid"
+            "&fulfillment_status=fulfilled"
+            "&product_id=speaker"
+        ),
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["page"] == 1
+    assert data["page_size"] == 1
+    assert data["total"] == 2
+    assert data["total_pages"] == 2
+    assert data["has_next"] is True
+    assert data["has_previous"] is False
+
+    assert len(data["items"]) == 1
+    assert data["items"][0]["status"] == "paid"
+    assert data["items"][0]["fulfillment_status"] == "fulfilled"
+    assert data["items"][0]["product_id"] == "speaker"
+
+    second_page_response = await client.get(
+        (
+            "/orders?page=2&page_size=1"
+            "&status=paid"
+            "&fulfillment_status=fulfilled"
+            "&product_id=speaker"
+        ),
+        headers={"X-API-Key": "test"},
+    )
+
+    assert second_page_response.status_code == 200
+
+    second_page = second_page_response.json()
+
+    assert second_page["page"] == 2
+    assert second_page["page_size"] == 1
+    assert second_page["total"] == 2
+    assert second_page["total_pages"] == 2
+    assert second_page["has_next"] is False
+    assert second_page["has_previous"] is True
+    assert len(second_page["items"]) == 1
 
 
 @pytest.mark.anyio
@@ -1688,3 +1799,53 @@ async def test_stripe_webhook_directly_covers_paid_transaction(
     assert updated_order.stripe_payment_intent == "pi_direct_paid"
     assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
     assert delivered_orders == [order_id]
+
+
+@pytest.mark.anyio
+async def test_orders_large_page_number_returns_empty_page(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_large_page",
+        amount=4999,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.fulfilled,
+        livemode=False,
+    )
+
+    db_session.add(order)
+    await db_session.commit()
+
+    response = await client.get(
+        "/orders?page=100500&page_size=25",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["items"] == []
+    assert data["page"] == 100500
+    assert data["page_size"] == 25
+    assert data["total"] == 1
+    assert data["total_pages"] == 1
+    assert data["has_next"] is False
+    assert data["has_previous"] is True
+
+
+@pytest.mark.anyio
+async def test_orders_rejects_too_large_page_size(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(
+        "/orders?page=1&page_size=100500",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 422
