@@ -1,7 +1,8 @@
 from math import ceil
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,9 +12,23 @@ from app.schemas import OrderListResponse, OrderResponse
 from app.security import require_orders_api_key
 
 router = APIRouter(tags=["Orders"])
+templates = Jinja2Templates(directory="app/templates")
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 RequireOrdersApiKey = Annotated[None, Depends(require_orders_api_key)]
+
+
+@router.get(
+    "/orders-ui",
+    summary="Orders UI",
+    description="Operator page for accessing orders with an API key.",
+)
+async def orders_page(request: Request) -> Response:
+    return templates.TemplateResponse(
+        request=request,
+        name="orders.html",
+        context={},
+    )
 
 
 @router.get(

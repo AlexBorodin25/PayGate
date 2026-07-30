@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orders | PayGate</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+    <div class="header-inner">
+        <h1 class="logo">PayGate</h1>
+        <nav class="nav-space" aria-label="Main navigation">
+            <a href="/">Products</a>
+            <a href="/orders-ui">Orders</a>
+        </nav>
+    </div>
+</header>
+
+<main>
+    <section class="orders-toolbar">
+        <div>
+            <p class="status-eyebrow">Operator view</p>
+            <h2 class="page-title">Orders</h2>
+        </div>
+
+        <div class="orders-controls">
+            <input id="api-key" type="password" placeholder="Orders API Key">
+
+            <select id="status-filter">
+                <option value="">Any payment status</option>
+                <option value="pending">Pending</option>
+                <option value="paid">Paid</option>
+                <option value="checkout_failed">Checkout failed</option>
+            </select>
+
+            <select id="fulfillment-filter">
+                <option value="">Any fulfillment status</option>
+                <option value="pending">Pending</option>
+                <option value="processing">Processing</option>
+                <option value="fulfilled">Fulfilled</option>
+                <option value="payment_review">Payment review</option>
+            </select>
+
+            <input id="product-filter" type="text" placeholder="Product ID">
+
+            <button type="button" id="load-orders">Load</button>
+        </div>
+    </section>
+
+    <section class="orders-summary" id="orders-summary">
+        Enter the orders API key to show orders.
+    </section>
+
+    <section class="orders-table-wrap">
+        <table class="orders-table">
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th>Product</th>
+                <th>Amount</th>
+                <th>Status</th>
+                <th>Fulfillment</th>
+                <th>Payment Intent</th>
+                <th>Fulfilled At</th>
+                <th>Created</th>
+            </tr>
+            </thead>
+            <tbody id="orders-body"></tbody>
+        </table>
+    </section>
+
+    <div class="pagination-controls">
+        <button type="button" id="previous-page" disabled>Previous</button>
+        <span id="page-label">Page 1</span>
+        <button type="button" id="next-page" disabled>Next</button>
+    </div>
+</main>
+
+<footer class="site-footer">
+    <div class="footer-inner">
+        PayGate operator order view.
+    </div>
+</footer>
+
+<script>
+    let page = 1;
+    let hasNext = false;
+
+    const apiKeyInput = document.getElementById("api-key");
+    const statusFilter = document.getElementById("status-filter");
+    const fulfillmentFilter = document.getElementById("fulfillment-filter");
+    const productFilter = document.getElementById("product-filter");
+    const ordersBody = document.getElementById("orders-body");
+    const ordersSummary = document.getElementById("orders-summary");
+    const pageLabel = document.getElementById("page-label");
+    const previousButton = document.getElementById("previous-page");
+    const nextButton = document.getElementById("next-page");
+
+    function formatDate(value) {
+        if (!value) {
+            return "";
+        }
+
+        return new Date(value).toLocaleString();
+    }
+
+    function formatAmount(amount, currency) {
+        return `${(amount / 100).toFixed(2)} ${currency}`;
+    }
+
+    function statusClass(value) {
+        return `status-badge status-${value.replace("_", "-")}`;
+    }
+
+    function appendCell(row, value) {
+        const cell = document.createElement("td");
+        cell.textContent = value || "";
+        row.appendChild(cell);
+    }
+
+    function appendStatusCell(row, value) {
+        const cell = document.createElement("td");
+        const badge = document.createElement("span");
+
+        badge.className = statusClass(value);
+        badge.textContent = value;
+
+        cell.appendChild(badge);
+        row.appendChild(cell);
+    }
+
+    function setEmptyState(message) {
+        ordersSummary.textContent = message;
+        ordersBody.textContent = "";
+        previousButton.disabled = true;
+        nextButton.disabled = true;
+    }
+
+    async function loadOrders() {
+        const apiKey = apiKeyInput.value.trim();
+
+        if (!apiKey) {
+            setEmptyState("Enter the orders API key.");
+            return;
+        }
+
+        const params = new URLSearchParams({
+            page: String(page),
+            page_size: "10",
+        });
+
+        if (statusFilter.value) {
+            params.set("status", statusFilter.value);
+        }
+
+        if (fulfillmentFilter.value) {
+            params.set("fulfillment_status", fulfillmentFilter.value);
+        }
+
+        if (productFilter.value.trim()) {
+            params.set("product_id", productFilter.value.trim());
+        }
+
+        try {
+            const response = await fetch(`/orders?${params.toString()}`, {
+                headers: {
+                    "X-API-Key": apiKey,
+                },
+            });
+
+            if (response.status === 401) {
+                setEmptyState("The API key is missing or invalid.");
+                return;
+            }
+
+            if (!response.ok) {
+                setEmptyState(`Could not load orders. Status: ${response.status}`);
+                return;
+            }
+
+            const data = await response.json();
+
+            hasNext = data.has_next;
+            page = data.page;
+
+            ordersSummary.textContent =
+                `${data.total} orders found. Showing page ${data.page} of ${data.total_pages || 1}.`;
+
+            pageLabel.textContent = `Page ${data.page}`;
+            previousButton.disabled = !data.has_previous;
+            nextButton.disabled = !data.has_next;
+
+            ordersBody.textContent = "";
+
+            for (const order of data.items) {
+                const row = document.createElement("tr");
+
+                appendCell(row, String(order.id));
+                appendCell(row, order.product_id);
+                appendCell(row, formatAmount(order.amount, order.currency));
+                appendStatusCell(row, order.status);
+                appendStatusCell(row, order.fulfillment_status);
+                appendCell(row, order.stripe_payment_intent);
+                appendCell(row, formatDate(order.fulfilled_at));
+                appendCell(row, formatDate(order.created_at));
+
+                ordersBody.appendChild(row);
+            }
+        } catch (error) {
+            console.error(error);
+            setEmptyState("Could not connect to the orders API.");
+        }
+    }
+
+    document.getElementById("load-orders").addEventListener("click", () => {
+        page = 1;
+        loadOrders();
+    });
+
+    previousButton.addEventListener("click", () => {
+        if (page > 1) {
+            page -= 1;
+            loadOrders();
+        }
+    });
+
+    nextButton.addEventListener("click", () => {
+        if (hasNext) {
+            page += 1;
+            loadOrders();
+        }
+    });
+
+    statusFilter.addEventListener("change", () => {
+        page = 1;
+    });
+
+    fulfillmentFilter.addEventListener("change", () => {
+        page = 1;
+    });
+
+    productFilter.addEventListener("input", () => {
+        page = 1;
+    });
+</script>
+</body>
+</html>
