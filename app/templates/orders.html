@@ -55,16 +55,40 @@
     <section class="orders-table-wrap">
         <table class="orders-table">
             <thead>
-                <tr>
-                    <th><button type="button" class="table-sort" data-sort="id">ID</button></th>
-                    <th><button type="button" class="table-sort" data-sort="product_id">Product</button></th>
-                    <th><button type="button" class="table-sort" data-sort="amount">Amount</button></th>
-                    <th><button type="button" class="table-sort" data-sort="status">Status</button></th>
-                    <th><button type="button" class="table-sort" data-sort="fulfillment_status">Fulfillment</button></th>
-                    <th>Payment Intent</th>
-                    <th>Fulfilled At</th>
-                    <th><button type="button" class="table-sort" data-sort="created_at">Created</button></th>
-                </tr>
+            <tr>
+                <th>
+                    <button type="button" class="table-sort" data-sort="id">
+                        ID <span class="sort-indicator" data-indicator="id"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="product_id">
+                        Product <span class="sort-indicator" data-indicator="product_id"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="amount">
+                        Amount <span class="sort-indicator" data-indicator="amount"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="status">
+                        Status <span class="sort-indicator" data-indicator="status"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="fulfillment_status">
+                        Fulfillment <span class="sort-indicator" data-indicator="fulfillment_status"></span>
+                    </button>
+                </th>
+                <th>Payment Intent</th>
+                <th>Fulfilled At</th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="created_at">
+                        Created <span class="sort-indicator" data-indicator="created_at"></span>
+                    </button>
+                </th>
+            </tr>
             </thead>
             <tbody id="orders-body"></tbody>
         </table>
@@ -139,6 +163,17 @@
         nextButton.disabled = true;
     }
 
+    function updateSortIndicators() {
+        document.querySelectorAll(".sort-indicator").forEach((indicator) => {
+            if (indicator.dataset.indicator === sortBy) {
+                indicator.textContent = sortDirection === "asc" ? "↑" : "↓";
+                return;
+            }
+
+            indicator.textContent = "";
+        });
+    }
+
     async function loadOrders() {
         const apiKey = apiKeyInput.value.trim();
 
@@ -193,6 +228,7 @@
                 `${data.total} orders found. Showing page ${data.page} of ${data.total_pages || 1}.`;
 
             pageLabel.textContent = `Page ${data.page}`;
+            updateSortIndicators();
             previousButton.disabled = !data.has_previous;
             nextButton.disabled = !data.has_next;
 
@@ -264,6 +300,8 @@
             loadOrders();
         });
     });
+
+    updateSortIndicators();
 
 </script>
 </body>

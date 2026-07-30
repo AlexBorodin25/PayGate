@@ -325,3 +325,11 @@ button:disabled {
     background: transparent;
     text-decoration: underline;
 }
+
+.sort-indicator {
+    display: inline-block;
+    min-width: 14px;
+    margin-left: 4px;
+    color: #1d4ed8;
+    font-weight: 800;
+}
