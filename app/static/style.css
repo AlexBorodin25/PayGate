@@ -308,3 +308,20 @@ button:disabled {
         min-width: auto;
     }
 }
+
+.table-sort {
+    width: auto;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: #334155;
+    font: inherit;
+    font-weight: 750;
+    cursor: pointer;
+}
+
+.table-sort:hover {
+    color: #1d4ed8;
+    background: transparent;
+    text-decoration: underline;
+}

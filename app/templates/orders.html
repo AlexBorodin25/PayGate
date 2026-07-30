@@ -55,16 +55,16 @@
     <section class="orders-table-wrap">
         <table class="orders-table">
             <thead>
-            <tr>
-                <th>ID</th>
-                <th>Product</th>
-                <th>Amount</th>
-                <th>Status</th>
-                <th>Fulfillment</th>
-                <th>Payment Intent</th>
-                <th>Fulfilled At</th>
-                <th>Created</th>
-            </tr>
+                <tr>
+                    <th><button type="button" class="table-sort" data-sort="id">ID</button></th>
+                    <th><button type="button" class="table-sort" data-sort="product_id">Product</button></th>
+                    <th><button type="button" class="table-sort" data-sort="amount">Amount</button></th>
+                    <th><button type="button" class="table-sort" data-sort="status">Status</button></th>
+                    <th><button type="button" class="table-sort" data-sort="fulfillment_status">Fulfillment</button></th>
+                    <th>Payment Intent</th>
+                    <th>Fulfilled At</th>
+                    <th><button type="button" class="table-sort" data-sort="created_at">Created</button></th>
+                </tr>
             </thead>
             <tbody id="orders-body"></tbody>
         </table>
@@ -86,6 +86,8 @@
 <script>
     let page = 1;
     let hasNext = false;
+    let sortBy = "created_at";
+    let sortDirection = "desc";
 
     const apiKeyInput = document.getElementById("api-key");
     const statusFilter = document.getElementById("status-filter");
@@ -149,6 +151,9 @@
             page: String(page),
             page_size: "10",
         });
+
+        params.set("sort_by", sortBy);
+        params.set("sort_direction", sortDirection);
 
         if (statusFilter.value) {
             params.set("status", statusFilter.value);
@@ -243,6 +248,23 @@
     productFilter.addEventListener("input", () => {
         page = 1;
     });
+
+    document.querySelectorAll(".table-sort").forEach((button) => {
+        button.addEventListener("click", () => {
+            const nextSort = button.dataset.sort;
+
+            if (sortBy === nextSort) {
+                sortDirection = sortDirection === "asc" ? "desc" : "asc";
+            } else {
+                sortBy = nextSort;
+                sortDirection = "desc";
+            }
+
+            page = 1;
+            loadOrders();
+        });
+    });
+
 </script>
 </body>
 </html>
