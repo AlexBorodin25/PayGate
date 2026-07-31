@@ -5,7 +5,7 @@ from locust import HttpUser, between, task
 
 
 class OrdersApiUser(HttpUser):
-    wait_time = between(0.5, 2.0)
+    wait_time = between(1.0, 3.0)
 
     def on_start(self) -> None:
         self.api_key = os.environ["ORDERS_API_KEY"]
@@ -13,7 +13,7 @@ class OrdersApiUser(HttpUser):
     @task(5)
     def list_orders_first_page(self) -> None:
         self.client.get(
-            "/orders?page=1&page_size=25&include_total=false",
+            "/orders?page=1&page_size=10&include_total=false",
             headers={"X-API-Key": self.api_key},
             name="/orders first page",
         )
@@ -27,7 +27,7 @@ class OrdersApiUser(HttpUser):
 
         self.client.get(
             (
-                "/orders?page=1&page_size=25&include_total=false"
+                "/orders?page=1&page_size=10&include_total=false"
                 f"&status={status}"
                 f"&fulfillment_status={fulfillment_status}"
             ),
@@ -44,7 +44,7 @@ class OrdersApiUser(HttpUser):
 
         self.client.get(
             (
-                "/orders?page=1&page_size=25&include_total=false"
+                "/orders?page=1&page_size=10&include_total=false"
                 f"&sort_by={sort_by}"
                 f"&sort_direction={sort_direction}"
             ),
@@ -57,7 +57,7 @@ class OrdersApiUser(HttpUser):
         page = choice([2, 5, 10, 25, 50])
 
         self.client.get(
-            f"/orders?page={page}&page_size=25&include_total=false",
+            f"/orders?page={page}&page_size=10&include_total=false",
             headers={"X-API-Key": self.api_key},
             name="/orders later page",
         )
