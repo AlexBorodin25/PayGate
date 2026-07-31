@@ -56,14 +56,38 @@
         <table class="orders-table">
             <thead>
             <tr>
-                <th>ID</th>
-                <th>Product</th>
-                <th>Amount</th>
-                <th>Status</th>
-                <th>Fulfillment</th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="id">
+                        ID <span class="sort-indicator" data-indicator="id"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="product_id">
+                        Product <span class="sort-indicator" data-indicator="product_id"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="amount">
+                        Amount <span class="sort-indicator" data-indicator="amount"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="status">
+                        Status <span class="sort-indicator" data-indicator="status"></span>
+                    </button>
+                </th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="fulfillment_status">
+                        Fulfillment <span class="sort-indicator" data-indicator="fulfillment_status"></span>
+                    </button>
+                </th>
                 <th>Payment Intent</th>
                 <th>Fulfilled At</th>
-                <th>Created</th>
+                <th>
+                    <button type="button" class="table-sort" data-sort="created_at">
+                        Created <span class="sort-indicator" data-indicator="created_at"></span>
+                    </button>
+                </th>
             </tr>
             </thead>
             <tbody id="orders-body"></tbody>
@@ -86,6 +110,8 @@
 <script>
     let page = 1;
     let hasNext = false;
+    let sortBy = "created_at";
+    let sortDirection = "desc";
 
     const apiKeyInput = document.getElementById("api-key");
     const statusFilter = document.getElementById("status-filter");
@@ -137,6 +163,17 @@
         nextButton.disabled = true;
     }
 
+    function updateSortIndicators() {
+        document.querySelectorAll(".sort-indicator").forEach((indicator) => {
+            if (indicator.dataset.indicator === sortBy) {
+                indicator.textContent = sortDirection === "asc" ? "↑" : "↓";
+                return;
+            }
+
+            indicator.textContent = "";
+        });
+    }
+
     async function loadOrders() {
         const apiKey = apiKeyInput.value.trim();
 
@@ -149,6 +186,9 @@
             page: String(page),
             page_size: "10",
         });
+
+        params.set("sort_by", sortBy);
+        params.set("sort_direction", sortDirection);
 
         if (statusFilter.value) {
             params.set("status", statusFilter.value);
@@ -188,6 +228,7 @@
                 `${data.total} orders found. Showing page ${data.page} of ${data.total_pages || 1}.`;
 
             pageLabel.textContent = `Page ${data.page}`;
+            updateSortIndicators();
             previousButton.disabled = !data.has_previous;
             nextButton.disabled = !data.has_next;
 
@@ -243,6 +284,25 @@
     productFilter.addEventListener("input", () => {
         page = 1;
     });
+
+    document.querySelectorAll(".table-sort").forEach((button) => {
+        button.addEventListener("click", () => {
+            const nextSort = button.dataset.sort;
+
+            if (sortBy === nextSort) {
+                sortDirection = sortDirection === "asc" ? "desc" : "asc";
+            } else {
+                sortBy = nextSort;
+                sortDirection = "desc";
+            }
+
+            page = 1;
+            loadOrders();
+        });
+    });
+
+    updateSortIndicators();
+
 </script>
 </body>
 </html>

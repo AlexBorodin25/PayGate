@@ -1,5 +1,5 @@
 from math import ceil
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.templating import Jinja2Templates
@@ -16,6 +16,16 @@ templates = Jinja2Templates(directory="app/templates")
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 RequireOrdersApiKey = Annotated[None, Depends(require_orders_api_key)]
+
+OrderSortField = Literal[
+    "created_at",
+    "id",
+    "amount",
+    "status",
+    "fulfillment_status",
+    "product_id",
+]
+SortDirection = Literal["asc", "desc"]
 
 
 @router.get(
@@ -52,6 +62,8 @@ async def list_orders(
     status: OrderStatus | None = None,
     fulfillment_status: FulfillmentStatus | None = None,
     product_id: str | None = None,
+    sort_by: OrderSortField = "created_at",
+    sort_direction: SortDirection = "desc",
 ) -> OrderListResponse:
     filters = []
 
@@ -70,11 +82,27 @@ async def list_orders(
     total_pages = ceil(total / page_size) if total else 0
     offset = (page - 1) * page_size
 
+    sort_columns = {
+        "created_at": Order.created_at,
+        "id": Order.id,
+        "amount": Order.amount,
+        "status": Order.status,
+        "fulfillment_status": Order.fulfillment_status,
+        "product_id": Order.product_id,
+    }
+
+    sort_column = sort_columns[sort_by]
+    sort_expression = (
+        sort_column.asc() if sort_direction == "asc" else sort_column.desc()
+    )
+
+    id_tiebreaker = Order.id.asc() if sort_direction == "asc" else Order.id.desc()
+
     orders = (
         await db.scalars(
             select(Order)
             .where(*filters)
-            .order_by(Order.created_at.desc(), Order.id.desc())
+            .order_by(sort_expression, id_tiebreaker)
             .offset(offset)
             .limit(page_size)
         )
