@@ -7,6 +7,12 @@ if (-not $hostUrl) {
 $users = @(1, 5, 10, 20, 500)
 
 foreach ($userCount in $users) {
+    $spawnRate = $userCount
+
+    if ($userCount -eq 500) {
+        $spawnRate = 50
+    }
+
     locust `
       -f tests/load_tests/orders_locustfile.py `
       --headless `
@@ -16,3 +22,4 @@ foreach ($userCount in $users) {
       --host $hostUrl `
       --csv "tests/load_tests/results/orders_${userCount}_users"
 }
+
