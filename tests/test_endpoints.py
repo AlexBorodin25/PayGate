@@ -1936,3 +1936,42 @@ async def test_orders_reject_invalid_sort_direction(client: AsyncClient) -> None
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_orders_can_skip_total_count(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    db_session.add_all(
+        [
+            Order(
+                product_id=product.id,
+                stripe_session_id=f"cs_test_skip_total_{index}",
+                amount=4999,
+                currency="USD",
+                status=OrderStatus.paid,
+                fulfillment_status=FulfillmentStatus.fulfilled,
+                livemode=False,
+            )
+            for index in range(3)
+        ]
+    )
+    await db_session.commit()
+
+    response = await client.get(
+        "/orders?page=1&page_size=2&include_total=false",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data["items"]) == 2
+    assert data["total"] == 0
+    assert data["total_pages"] == 0
+    assert data["has_next"] is True
+    assert data["has_previous"] is False

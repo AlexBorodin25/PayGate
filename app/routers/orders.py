@@ -68,6 +68,7 @@ async def list_orders(
     product_id: str | None = None,
     sort_by: OrderSortField = "created_at",
     sort_direction: SortDirection = "desc",
+    include_total: bool = True,
 ) -> OrderListResponse:
     filters = []
 
@@ -96,26 +97,37 @@ async def list_orders(
     id_tiebreaker = Order.id.asc() if sort_direction == "asc" else Order.id.desc()
 
     try:
-        total = await db.scalar(select(func.count()).select_from(Order).where(*filters))
-        total = total or 0
+        total = 0
+        total_pages = 0
 
-        total_pages = ceil(total / page_size) if total else 0
+        if include_total:
+            total_result = await db.scalar(
+                select(func.count()).select_from(Order).where(*filters)
+            )
+            total = total_result or 0
+            total_pages = ceil(total / page_size) if total else 0
+
         offset = (page - 1) * page_size
+        limit = page_size if include_total else page_size + 1
 
-        orders = (
+        rows = (
             await db.scalars(
                 select(Order)
                 .where(*filters)
                 .order_by(sort_expression, id_tiebreaker)
                 .offset(offset)
-                .limit(page_size)
+                .limit(limit)
             )
         ).all()
+
+        has_extra_row = not include_total and len(rows) > page_size
+        orders = list(rows[:page_size])
 
     except SQLAlchemyError as error:
         logger.exception(
             "Orders query failed page=%s page_size=%s status=%s "
-            "fulfillment_status=%s product_id=%s sort_by=%s sort_direction=%s",
+            "fulfillment_status=%s product_id=%s sort_by=%s "
+            "sort_direction=%s include_total=%s",
             page,
             page_size,
             status,
@@ -123,6 +135,7 @@ async def list_orders(
             product_id,
             sort_by,
             sort_direction,
+            include_total,
         )
         raise HTTPException(
             status_code=503,
@@ -135,6 +148,6 @@ async def list_orders(
         page_size=page_size,
         total=total,
         total_pages=total_pages,
-        has_next=page < total_pages,
+        has_next=page < total_pages if include_total else has_extra_row,
         has_previous=page > 1,
     )
