@@ -10,7 +10,7 @@ foreach ($userCount in $users) {
     $spawnRate = $userCount
 
     if ($userCount -eq 500) {
-        $spawnRate = 50
+        $spawnRate = 25
     }
 
     locust `
