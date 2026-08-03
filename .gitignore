@@ -11,4 +11,3 @@ __pycache__/
 .coverage
 htmlcov/
 coverage.xml
-tests/load_tests/results/
