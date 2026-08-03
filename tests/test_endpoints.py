@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
-from fastapi import BackgroundTasks
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -654,94 +654,6 @@ async def test_webhook_ignores_unpaid_checkout(
 
 
 @pytest.mark.anyio
-async def test_webhook_marks_order_paid_and_fulfilled(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: Any,
-) -> None:
-    product = await add_test_product(db_session)
-    order = await add_test_order(db_session, product)
-
-    order_id = order.id
-    product_id = product.id
-    product_price = product.price
-    product_currency = product.currency
-
-    await db_session.rollback()
-
-    delivered_orders = []
-
-    async def fake_deliver_product(order_id: int) -> None:
-        delivered_orders.append(order_id)
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr(
-        background_tasks.fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        background_tasks,
-        "standalone_session",
-        fake_standalone_session,
-    )
-    monkeypatch.setattr(
-        webhooks_router.stripe.Webhook,
-        "construct_event",
-        lambda payload, sig_header, secret: fake_checkout_completed_event(
-            event_id="evt_test_paid",
-            order_id=order_id,
-            product_id=product_id,
-            amount=product_price,
-            currency=product_currency.lower(),
-            session_id="cs_test_123",
-            payment_intent="pi_test_123",
-        ),
-    )
-
-    assert order.stripe_session_id == "cs_test_123"
-    assert order.product_id == product_id
-    assert order.amount == product_price
-    assert order.currency.lower() == product_currency.lower()
-    assert order.livemode is False
-
-    response = await client.post(
-        "/webhooks/stripe",
-        content=b"{}",
-        headers={"Stripe-Signature": "test-signature"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"received": True}
-
-    db_session.expire_all()
-
-    updated_order = await db_session.get(Order, order_id)
-    updated_product = await db_session.get(Product, product_id)
-
-    assert updated_order is not None
-    assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
-    assert updated_order.fulfilled_at is not None
-    assert updated_order.stripe_payment_intent == "pi_test_123"
-
-    assert updated_product is not None
-    assert updated_product.quantity == 10
-
-    assert delivered_orders == [order_id]
-
-
-@pytest.mark.anyio
 async def test_webhook_does_not_fulfill_on_currency_mismatch(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -919,10 +831,9 @@ async def test_webhook_missing_order_returns_200(
 
 
 @pytest.mark.anyio
-async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
+async def test_webhook_late_payment_with_stock_marks_paid_and_enqueues_fulfillment(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: Any,
 ) -> None:
     product = await add_test_product(db_session)
@@ -948,30 +859,20 @@ async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
 
     await db_session.rollback()
 
-    delivered_orders = []
+    queued_jobs: list[tuple[int, str, str]] = []
 
-    async def fake_deliver_product(order_id: int) -> None:
-        delivered_orders.append(order_id)
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        queued_jobs.append((order_id, session_id, event_id))
 
     monkeypatch.setattr(
-        background_tasks.fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        background_tasks,
-        "standalone_session",
-        fake_standalone_session,
+        webhooks_router,
+        "enqueue_fulfillment",
+        fake_enqueue_fulfillment,
     )
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
@@ -987,12 +888,6 @@ async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
         ),
     )
 
-    assert order.stripe_session_id == "cs_test_late_with_stock"
-    assert order.product_id == product_id
-    assert order.amount == product_price
-    assert order.currency.lower() == product_currency.lower()
-    assert order.livemode is False
-
     response = await client.post(
         "/webhooks/stripe",
         content=b"{}",
@@ -1000,23 +895,71 @@ async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
     )
 
     assert response.status_code == 200
+    assert queued_jobs == [
+        (order_id, "cs_test_late_with_stock", "evt_test_late_with_stock")
+    ]
 
     db_session.expire_all()
-
     updated_order = await db_session.get(Order, order_id)
     updated_product = await db_session.get(Product, product_id)
 
     assert updated_order is not None
     assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
-    assert updated_order.fulfilled_at is not None
-    assert updated_order.stock_reserved is False
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
     assert updated_order.stripe_payment_intent == "pi_test_late_with_stock"
-
+    assert updated_order.stock_reserved is False
     assert updated_product is not None
     assert updated_product.quantity == 0
 
-    assert delivered_orders == [order_id]
+
+@pytest.mark.anyio
+async def test_fulfillment_failure_leaves_order_pending(
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    order_id = order.id
+    await db_session.rollback()
+
+    async def fail_delivery(order_id: int) -> None:
+        raise RuntimeError("delivery failed")
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        background_tasks.fulfillment_service,
+        "deliver_product",
+        fail_delivery,
+    )
+    monkeypatch.setattr(
+        background_tasks,
+        "standalone_session",
+        fake_standalone_session,
+    )
+
+    await background_tasks.run_fulfillment(
+        order_id,
+        "cs_test_123",
+        "evt_test_delivery_fails",
+    )
+
+    db_session.expire_all()
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
+    assert updated_order.fulfilled_at is None
 
 
 @pytest.mark.anyio
@@ -1090,84 +1033,6 @@ async def test_webhook_late_payment_without_stock_goes_to_payment_review(
 
     assert updated_product is not None
     assert updated_product.quantity == 0
-
-
-@pytest.mark.anyio
-async def test_fulfillment_failure_leaves_order_pending(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: Any,
-) -> None:
-    product = await add_test_product(db_session)
-    order = await add_test_order(db_session, product)
-
-    order_id = order.id
-    product_id = product.id
-    product_price = product.price
-    product_currency = product.currency
-
-    await db_session.rollback()
-
-    async def fail_delivery(order_id: int) -> None:
-        raise RuntimeError("delivery failed")
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr(
-        background_tasks.fulfillment_service,
-        "deliver_product",
-        fail_delivery,
-    )
-    monkeypatch.setattr(
-        background_tasks,
-        "standalone_session",
-        fake_standalone_session,
-    )
-    monkeypatch.setattr(
-        webhooks_router.stripe.Webhook,
-        "construct_event",
-        lambda payload, sig_header, secret: SimpleNamespace(
-            id="evt_test_delivery_fails",
-            type="checkout.session.completed",
-            data=SimpleNamespace(
-                object=SimpleNamespace(
-                    id="cs_test_123",
-                    payment_status="paid",
-                    client_reference_id=str(order_id),
-                    metadata={"product_id": product_id},
-                    amount_total=product_price,
-                    currency=product_currency.lower(),
-                    livemode=False,
-                    payment_intent="pi_test_123",
-                )
-            ),
-        ),
-    )
-
-    response = await client.post(
-        "/webhooks/stripe",
-        content=b"{}",
-        headers={"Stripe-Signature": "test-signature"},
-    )
-
-    assert response.status_code == 200
-
-    db_session.expire_all()
-    updated_order = await db_session.get(Order, order_id)
-
-    assert updated_order is not None
-    assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.pending
-    assert updated_order.fulfilled_at is None
 
 
 @pytest.mark.anyio
@@ -1721,87 +1586,6 @@ async def test_orders_support_pagination_and_filters(
 
 
 @pytest.mark.anyio
-async def test_stripe_webhook_directly_covers_paid_transaction(
-    db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: Any,
-) -> None:
-    product = await add_test_product(db_session)
-    order = await add_test_order(db_session, product)
-
-    order_id = order.id
-    product_id = product.id
-    product_price = product.price
-    product_currency = product.currency
-
-    await db_session.rollback()
-
-    class FakeRequest:
-        async def body(self) -> bytes:
-            return b"{}"
-
-    delivered_orders = []
-
-    async def fake_deliver_product(order_id: int) -> None:
-        delivered_orders.append(order_id)
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr(
-        fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        webhooks_router.stripe.Webhook,
-        "construct_event",
-        lambda payload, sig_header, secret: fake_checkout_completed_event(
-            event_id="evt_direct_paid",
-            order_id=order_id,
-            product_id=product_id,
-            amount=product_price,
-            currency=product_currency.lower(),
-            session_id="cs_test_123",
-            payment_intent="pi_direct_paid",
-        ),
-    )
-
-    background_tasks = BackgroundTasks()
-
-    response = await webhooks_router.stripe_webhook(
-        request=FakeRequest(),
-        db=db_session,
-        background_tasks=background_tasks,
-        sig_header="test-signature",
-    )
-
-    await background_tasks()
-
-    db_session.expire_all()
-    updated_order = await db_session.get(Order, order_id)
-
-    assert response == {"received": True}
-    assert updated_order is not None
-    assert updated_order.status == OrderStatus.paid
-    assert updated_order.stripe_payment_intent == "pi_direct_paid"
-    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
-    assert delivered_orders == [order_id]
-
-
-@pytest.mark.anyio
 async def test_orders_large_page_number_returns_empty_page(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -1975,3 +1759,276 @@ async def test_orders_can_skip_total_count(
     assert data["total_pages"] == 0
     assert data["has_next"] is True
     assert data["has_previous"] is False
+
+
+@pytest.mark.anyio
+async def test_webhook_marks_order_paid_and_enqueues_fulfillment(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order_id = order.id
+    product_id = product.id
+    await db_session.commit()
+
+    queued_jobs: list[tuple[int, str, str]] = []
+
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        queued_jobs.append((order_id, session_id, event_id))
+
+    monkeypatch.setattr(
+        webhooks_router,
+        "enqueue_fulfillment",
+        fake_enqueue_fulfillment,
+    )
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_test_paid",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product.price,
+            currency=product.currency.lower(),
+            session_id="cs_test_123",
+            payment_intent="pi_test_123",
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert queued_jobs == [(order_id, "cs_test_123", "evt_test_paid")]
+
+
+@pytest.mark.anyio
+async def test_webhook_returns_503_when_qstash_enqueue_fails(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order_id = order.id
+    product_id = product.id
+    await db_session.commit()
+
+    async def fail_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        raise httpx.ConnectError("qstash unavailable")
+
+    monkeypatch.setattr(
+        webhooks_router,
+        "enqueue_fulfillment",
+        fail_enqueue_fulfillment,
+    )
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_test_qstash_fails",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product.price,
+            currency=product.currency.lower(),
+            session_id="cs_test_123",
+            payment_intent="pi_test_123",
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_wrong_secret(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    called = False
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    response = await client.post(
+        "/internal/fulfill/wrong-secret",
+        json={
+            "order_id": 1,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+    )
+
+    assert response.status_code == 404
+    assert called is False
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_runs_fulfillment(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    called_with: list[tuple[int, str, str]] = []
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        called_with.append((order_id, session_id, event_id))
+
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    response = await client.post(
+        "/internal/fulfill/test-internal-secret",
+        json={
+            "order_id": 123,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+    assert called_with == [(123, "cs_test_123", "evt_test_123")]
+
+
+@pytest.mark.anyio
+async def test_enqueue_fulfillment_publishes_qstash_job(
+    monkeypatch: Any,
+) -> None:
+    captured_request: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, timeout: float) -> None:
+            captured_request["timeout"] = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> FakeResponse:
+            captured_request["url"] = url
+            captured_request["headers"] = headers
+            captured_request["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.qstash.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+
+    from app.services.qstash import enqueue_fulfillment
+
+    await enqueue_fulfillment(
+        order_id=123,
+        session_id="cs_test_123",
+        event_id="evt_test_123",
+    )
+
+    assert captured_request["timeout"] == 5.0
+    assert captured_request["headers"]["Authorization"].startswith("Bearer ")
+    assert captured_request["headers"]["Content-Type"] == "application/json"
+    assert captured_request["json"] == {
+        "order_id": 123,
+        "session_id": "cs_test_123",
+        "event_id": "evt_test_123",
+    }
+    assert "qstash.upstash.io/v2/publish" in captured_request["url"]
+
+
+@pytest.mark.anyio
+async def test_enqueue_fulfillment_raises_for_qstash_error(
+    monkeypatch: Any,
+) -> None:
+    class FakeResponse:
+        status_code = 500
+
+        def raise_for_status(self) -> None:
+            raise httpx.HTTPStatusError(
+                "QStash error",
+                request=httpx.Request("POST", "https://qstash.upstash.io"),
+                response=httpx.Response(500),
+            )
+
+    class FakeAsyncClient:
+        def __init__(self, timeout: float) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.qstash.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+
+    from app.services.qstash import enqueue_fulfillment
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await enqueue_fulfillment(
+            order_id=123,
+            session_id="cs_test_123",
+            event_id="evt_test_123",
+        )

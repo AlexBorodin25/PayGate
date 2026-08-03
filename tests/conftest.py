@@ -18,6 +18,8 @@ os.environ["ORDERS_API_KEY"] = "test"
 os.environ["DATABASE_URL"] = (
     "postgresql+asyncpg://postgres:postgres@localhost:5433/paygate_test"
 )
+os.environ["QSTASH_TOKEN"] = "test-qstash-token"
+os.environ["INTERNAL_FULFILLMENT_SECRET"] = "test-internal-secret"
 
 from app.db import get_db
 from app.main import app
