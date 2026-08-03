@@ -29,6 +29,10 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/paygate_test
       APP_BASE_URL: http://test
       ORDERS_API_KEY: test
+      QSTASH_TOKEN: test-qstash-token
+      QSTASH_CURRENT_SIGNING_KEY: test-current-signing-key
+      QSTASH_NEXT_SIGNING_KEY: test-next-signing-key
+      INTERNAL_FULFILLMENT_SECRET: test-internal-secret
 
     steps:
       - name: Check out code

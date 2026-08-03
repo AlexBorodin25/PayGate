@@ -20,6 +20,8 @@ os.environ["DATABASE_URL"] = (
 )
 os.environ["QSTASH_TOKEN"] = "test-qstash-token"
 os.environ["INTERNAL_FULFILLMENT_SECRET"] = "test-internal-secret"
+os.environ["QSTASH_CURRENT_SIGNING_KEY"] = "test-current-signing-key"
+os.environ["QSTASH_NEXT_SIGNING_KEY"] = "test-next-signing-key"
 
 from app.db import get_db
 from app.main import app

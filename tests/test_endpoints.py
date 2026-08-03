@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1902,6 +1903,17 @@ async def test_internal_fulfill_runs_fulfillment(
 ) -> None:
     called_with: list[tuple[int, str, str]] = []
 
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        return "jti_internal_runs"
+
+    async def fake_reject_qstash_replay(jti: str) -> None:
+        return None
+
     async def fake_run_fulfillment(
         order_id: int,
         session_id: str,
@@ -1909,6 +1921,14 @@ async def test_internal_fulfill_runs_fulfillment(
     ) -> None:
         called_with.append((order_id, session_id, event_id))
 
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.reject_qstash_replay",
+        fake_reject_qstash_replay,
+    )
     monkeypatch.setattr(
         "app.routers.internal.run_fulfillment",
         fake_run_fulfillment,
@@ -1921,6 +1941,7 @@ async def test_internal_fulfill_runs_fulfillment(
             "session_id": "cs_test_123",
             "event_id": "evt_test_123",
         },
+        headers={"Upstash-Signature": "test-signature"},
     )
 
     assert response.status_code == 200
@@ -2032,3 +2053,150 @@ async def test_enqueue_fulfillment_raises_for_qstash_error(
             session_id="cs_test_123",
             event_id="evt_test_123",
         )
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_requires_qstash_signature(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/internal/fulfill/test-internal-secret",
+        json={
+            "order_id": 1,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "QStash signature is required."
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_invalid_qstash_signature(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/internal/fulfill/test-internal-secret",
+        json={
+            "order_id": 1,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+        headers={"Upstash-Signature": "invalid"},
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_verified_qstash_request_runs_fulfillment(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    fulfilled_jobs: list[tuple[int, str, str]] = []
+
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        return "jti_test_123"
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        fulfilled_jobs.append((order_id, session_id, event_id))
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    response = await client.post(
+        "/internal/fulfill/test-internal-secret",
+        json={
+            "order_id": 123,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+        headers={"Upstash-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+    assert fulfilled_jobs == [(123, "cs_test_123", "evt_test_123")]
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_replayed_qstash_message(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    seen_jtis: set[str] = set()
+
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        return "jti_replay_test"
+
+    async def fake_reject_qstash_replay(jti: str) -> None:
+        if jti in seen_jtis:
+            raise HTTPException(
+                status_code=409,
+                detail="QStash message replay rejected.",
+            )
+
+        seen_jtis.add(jti)
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.reject_qstash_replay",
+        fake_reject_qstash_replay,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    payload = {
+        "order_id": 123,
+        "session_id": "cs_test_123",
+        "event_id": "evt_test_123",
+    }
+
+    first_response = await client.post(
+        "/internal/fulfill/test-internal-secret",
+        json=payload,
+        headers={"Upstash-Signature": "test-signature"},
+    )
+
+    second_response = await client.post(
+        "/internal/fulfill/test-internal-secret",
+        json=payload,
+        headers={"Upstash-Signature": "test-signature"},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "QStash message replay rejected."

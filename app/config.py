@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     orders_api_key: str = Field(alias="ORDERS_API_KEY")
     qstash_token: str | None = None
     internal_fulfillment_secret: str
+    qstash_current_signing_key: str
+    qstash_next_signing_key: str
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
