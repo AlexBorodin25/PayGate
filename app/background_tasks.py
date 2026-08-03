@@ -55,9 +55,18 @@ async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None
             )
 
     except Exception:
+        async with standalone_session() as db:
+            await db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .where(Order.fulfillment_status == FulfillmentStatus.processing)
+                .values(fulfillment_status=FulfillmentStatus.pending)
+            )
+
         logger.exception(
             "Fulfillment failed for order_id=%s session_id=%s event_id=%s",
             order_id,
             session_id,
             event_id,
         )
+        raise
