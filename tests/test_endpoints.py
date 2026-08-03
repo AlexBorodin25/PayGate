@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -15,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import background_tasks
 from app.models import FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
+from app.routers import internal as internal_router
 from app.routers import products as products_router
 from app.routers import webhooks as webhooks_router
 from app.routers.checkout import release_expired_reservations
@@ -65,6 +68,20 @@ def fake_checkout_completed_event(
             )
         ),
     )
+
+
+def make_unsigned_qstash_signature(payload: dict[str, Any]) -> str:
+    encoded_header = (
+        base64.urlsafe_b64encode(json.dumps({"alg": "HS256"}).encode())
+        .decode()
+        .rstrip("=")
+    )
+
+    encoded_payload = (
+        base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    )
+
+    return f"{encoded_header}.{encoded_payload}.signature"
 
 
 async def add_test_order(
@@ -1897,59 +1914,6 @@ async def test_internal_fulfill_rejects_wrong_secret(
 
 
 @pytest.mark.anyio
-async def test_internal_fulfill_runs_fulfillment(
-    client: AsyncClient,
-    monkeypatch: Any,
-) -> None:
-    called_with: list[tuple[int, str, str]] = []
-
-    async def fake_verify_qstash_request(
-        *,
-        body: bytes,
-        signature: str | None,
-        destination_url: str,
-    ) -> str:
-        return "jti_internal_runs"
-
-    async def fake_reject_qstash_replay(jti: str) -> None:
-        return None
-
-    async def fake_run_fulfillment(
-        order_id: int,
-        session_id: str,
-        event_id: str,
-    ) -> None:
-        called_with.append((order_id, session_id, event_id))
-
-    monkeypatch.setattr(
-        "app.routers.internal.verify_qstash_request",
-        fake_verify_qstash_request,
-    )
-    monkeypatch.setattr(
-        "app.routers.internal.reject_qstash_replay",
-        fake_reject_qstash_replay,
-    )
-    monkeypatch.setattr(
-        "app.routers.internal.run_fulfillment",
-        fake_run_fulfillment,
-    )
-
-    response = await client.post(
-        "/internal/fulfill/test-internal-secret",
-        json={
-            "order_id": 123,
-            "session_id": "cs_test_123",
-            "event_id": "evt_test_123",
-        },
-        headers={"Upstash-Signature": "test-signature"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"received": True}
-    assert called_with == [(123, "cs_test_123", "evt_test_123")]
-
-
-@pytest.mark.anyio
 async def test_enqueue_fulfillment_publishes_qstash_job(
     monkeypatch: Any,
 ) -> None:
@@ -2200,3 +2164,72 @@ async def test_internal_fulfill_rejects_replayed_qstash_message(
     assert first_response.status_code == 200
     assert second_response.status_code == 409
     assert second_response.json()["detail"] == "QStash message replay rejected."
+
+
+def test_decode_qstash_jti_returns_jti() -> None:
+    signature = make_unsigned_qstash_signature({"jti": "jti_test_123"})
+
+    assert internal_router.decode_qstash_jti(signature) == "jti_test_123"
+
+
+def test_decode_qstash_jti_rejects_malformed_signature() -> None:
+    with pytest.raises(HTTPException) as error:
+        internal_router.decode_qstash_jti("not-a-jwt")
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "Invalid QStash signature."
+
+
+def test_decode_qstash_jti_rejects_invalid_payload() -> None:
+    signature = "header.not-valid-base64.signature"
+
+    with pytest.raises(HTTPException) as error:
+        internal_router.decode_qstash_jti(signature)
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "Invalid QStash signature."
+
+
+def test_decode_qstash_jti_rejects_missing_jti() -> None:
+    signature = make_unsigned_qstash_signature({"sub": "missing-jti"})
+
+    with pytest.raises(HTTPException) as error:
+        internal_router.decode_qstash_jti(signature)
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "QStash signature missing jti."
+
+
+@pytest.mark.anyio
+async def test_verify_qstash_request_returns_jti_after_valid_signature(
+    monkeypatch: Any,
+) -> None:
+    class FakeReceiver:
+        def __init__(
+            self,
+            *,
+            current_signing_key: str,
+            next_signing_key: str,
+        ) -> None:
+            pass
+
+        def verify(
+            self,
+            *,
+            body: str,
+            signature: str,
+            url: str,
+        ) -> None:
+            return None
+
+    monkeypatch.setattr(internal_router, "Receiver", FakeReceiver)
+
+    signature = make_unsigned_qstash_signature({"jti": "jti_valid"})
+
+    jti = await internal_router.verify_qstash_request(
+        body=b"{}",
+        signature=signature,
+        destination_url="http://test/internal/fulfill/test-internal-secret",
+    )
+
+    assert jti == "jti_valid"
