@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Path, Request
@@ -84,7 +85,7 @@ async def verify_qstash_request(
     return decode_qstash_jti(signature)
 
 
-async def reject_qstash_replay(jti: str) -> None:
+async def record_processed_qstash_message(jti: str) -> None:
     try:
         async with standalone_session() as db:
             db.add(ProcessedQstashMessage(jti=jti))
@@ -109,7 +110,7 @@ async def fulfill_order(
         Header(alias="Upstash-Signature"),
     ] = None,
 ) -> dict[str, bool]:
-    if secret != settings.internal_fulfillment_secret:
+    if not secrets.compare_digest(secret, settings.internal_fulfillment_secret):
         raise HTTPException(status_code=404, detail="Not found")
 
     body = await request.body()
@@ -123,7 +124,6 @@ async def fulfill_order(
         signature=upstash_signature,
         destination_url=destination_url,
     )
-    await reject_qstash_replay(jti)
 
     fulfillment_request = FulfillmentRequest.model_validate_json(body)
 
@@ -132,5 +132,7 @@ async def fulfill_order(
         session_id=fulfillment_request.session_id,
         event_id=fulfillment_request.event_id,
     )
+
+    await record_processed_qstash_message(jti)
 
     return {"received": True}

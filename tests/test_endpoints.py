@@ -966,11 +966,12 @@ async def test_fulfillment_failure_leaves_order_pending(
         fake_standalone_session,
     )
 
-    await background_tasks.run_fulfillment(
-        order_id,
-        "cs_test_123",
-        "evt_test_delivery_fails",
-    )
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await background_tasks.run_fulfillment(
+            order_id,
+            "cs_test_123",
+            "evt_test_delivery_fails",
+        )
 
     db_session.expire_all()
     updated_order = await db_session.get(Order, order_id)
@@ -2135,7 +2136,7 @@ async def test_internal_fulfill_rejects_replayed_qstash_message(
         fake_verify_qstash_request,
     )
     monkeypatch.setattr(
-        "app.routers.internal.reject_qstash_replay",
+        "app.routers.internal.record_processed_qstash_message",
         fake_reject_qstash_replay,
     )
     monkeypatch.setattr(

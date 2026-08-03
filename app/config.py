@@ -8,18 +8,24 @@ class Settings(BaseSettings):
     database_url: str = Field(alias="DATABASE_URL")
     app_base_url: str = Field(alias="APP_BASE_URL")
     orders_api_key: str = Field(alias="ORDERS_API_KEY")
-    qstash_token: str | None = None
+    qstash_token: str
     internal_fulfillment_secret: str
     qstash_current_signing_key: str
     qstash_next_signing_key: str
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    @field_validator("orders_api_key")
+    @field_validator(
+        "orders_api_key",
+        "qstash_token",
+        "internal_fulfillment_secret",
+        "qstash_current_signing_key",
+        "qstash_next_signing_key",
+    )
     @classmethod
-    def orders_api_key_not_blank(cls, value: str) -> str:
+    def required_secret_not_blank(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("Orders API key cannot be blank")
+            raise ValueError("Required secret cannot be blank")
         return value
 
 
