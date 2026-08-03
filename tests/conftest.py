@@ -11,14 +11,13 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
-os.environ.setdefault("STRIPE_SECRET_KEY", "test")
-os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "test")
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5433/paygate_test",
+os.environ["STRIPE_SECRET_KEY"] = "test"
+os.environ["STRIPE_WEBHOOK_SECRET"] = "test"
+os.environ["APP_BASE_URL"] = "http://test"
+os.environ["ORDERS_API_KEY"] = "test"
+os.environ["DATABASE_URL"] = (
+    "postgresql+asyncpg://postgres:postgres@localhost:5433/paygate_test"
 )
-os.environ.setdefault("APP_BASE_URL", "http://test")
-os.environ.setdefault("ORDERS_API_KEY", "test")
 
 from app.db import get_db
 from app.main import app

@@ -53,3 +53,10 @@ Invoke-RestMethod `
 To test failed checkout:
 
 Temporarily set an invalid Stripe secret key in '.env' or click back/cancel on the Stripe checkout page.
+
+To run Locust load_orders test use this:
+
+$env:ORDERS_API_KEY="your-orders-api-key"
+$env:LOAD_TEST_HOST="http://127.0.0.1:8000"
+
+.\scripts\run_orders_load_tests.ps1

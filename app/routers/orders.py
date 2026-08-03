@@ -1,9 +1,11 @@
+import logging
 from math import ceil
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -13,6 +15,7 @@ from app.security import require_orders_api_key
 
 router = APIRouter(tags=["Orders"])
 templates = Jinja2Templates(directory="app/templates")
+logger = logging.getLogger(__name__)
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 RequireOrdersApiKey = Annotated[None, Depends(require_orders_api_key)]
@@ -52,6 +55,7 @@ async def orders_page(request: Request) -> Response:
     responses={
         200: {"description": "Orders returned"},
         401: {"description": "Missing or invalid X-API-Key"},
+        503: {"description": "Orders database is temporarily unavailable"},
     },
 )
 async def list_orders(
@@ -64,6 +68,7 @@ async def list_orders(
     product_id: str | None = None,
     sort_by: OrderSortField = "created_at",
     sort_direction: SortDirection = "desc",
+    include_total: bool = True,
 ) -> OrderListResponse:
     filters = []
 
@@ -75,12 +80,6 @@ async def list_orders(
 
     if product_id is not None:
         filters.append(Order.product_id == product_id)
-
-    total = await db.scalar(select(func.count()).select_from(Order).where(*filters))
-    total = total or 0
-
-    total_pages = ceil(total / page_size) if total else 0
-    offset = (page - 1) * page_size
 
     sort_columns = {
         "created_at": Order.created_at,
@@ -95,18 +94,53 @@ async def list_orders(
     sort_expression = (
         sort_column.asc() if sort_direction == "asc" else sort_column.desc()
     )
-
     id_tiebreaker = Order.id.asc() if sort_direction == "asc" else Order.id.desc()
 
-    orders = (
-        await db.scalars(
-            select(Order)
-            .where(*filters)
-            .order_by(sort_expression, id_tiebreaker)
-            .offset(offset)
-            .limit(page_size)
+    try:
+        total = 0
+        total_pages = 0
+
+        if include_total:
+            total_result = await db.scalar(
+                select(func.count()).select_from(Order).where(*filters)
+            )
+            total = total_result or 0
+            total_pages = ceil(total / page_size) if total else 0
+
+        offset = (page - 1) * page_size
+        limit = page_size if include_total else page_size + 1
+
+        rows = (
+            await db.scalars(
+                select(Order)
+                .where(*filters)
+                .order_by(sort_expression, id_tiebreaker)
+                .offset(offset)
+                .limit(limit)
+            )
+        ).all()
+
+        has_extra_row = not include_total and len(rows) > page_size
+        orders = list(rows[:page_size])
+
+    except SQLAlchemyError as error:
+        logger.exception(
+            "Orders query failed page=%s page_size=%s status=%s "
+            "fulfillment_status=%s product_id=%s sort_by=%s "
+            "sort_direction=%s include_total=%s",
+            page,
+            page_size,
+            status,
+            fulfillment_status,
+            product_id,
+            sort_by,
+            sort_direction,
+            include_total,
         )
-    ).all()
+        raise HTTPException(
+            status_code=503,
+            detail="Orders database is temporarily unavailable.",
+        ) from error
 
     return OrderListResponse(
         items=[OrderResponse.model_validate(order) for order in orders],
@@ -114,6 +148,6 @@ async def list_orders(
         page_size=page_size,
         total=total,
         total_pages=total_pages,
-        has_next=page < total_pages,
+        has_next=page < total_pages if include_total else has_extra_row,
         has_previous=page > 1,
     )

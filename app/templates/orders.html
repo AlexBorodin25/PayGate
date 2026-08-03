@@ -183,8 +183,9 @@
         }
 
         const params = new URLSearchParams({
-            page: String(page),
+            page: page.toString(),
             page_size: "10",
+            include_total: "false",
         });
 
         params.set("sort_by", sortBy);
@@ -225,9 +226,13 @@
             page = data.page;
 
             ordersSummary.textContent =
-                `${data.total} orders found. Showing page ${data.page} of ${data.total_pages || 1}.`;
+                `${data.items.length} orders shown. Showing page ${data.page}.`;
 
-            pageLabel.textContent = `Page ${data.page}`;
+            if (data.total_pages > 0) {
+                pageLabel.textContent = `Page ${data.page} of ${data.total_pages}`;
+            } else {
+                pageLabel.textContent = `Page ${data.page}`;
+            }
             updateSortIndicators();
             previousButton.disabled = !data.has_previous;
             nextButton.disabled = !data.has_next;
