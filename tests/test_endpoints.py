@@ -1970,6 +1970,17 @@ async def test_enqueue_fulfillment_publishes_qstash_job(
         "event_id": "evt_test_123",
     }
     assert "qstash.upstash.io/v2/publish" in captured_request["url"]
+    assert captured_request["headers"][
+        "Upstash-Forward-X-Internal-Fulfillment-Secret"
+    ] == ("test-internal-secret")
+    assert captured_request["headers"]["Upstash-Retries"] == "3"
+    assert (
+        captured_request["headers"]["Upstash-Retry-Delay"]
+        == "exp(2.5 * retried) * 1000"
+    )
+    assert captured_request["headers"]["Upstash-Failure-Callback"] == (
+        "http://test/internal/qstash-failure"
+    )
 
 
 @pytest.mark.anyio
@@ -1977,14 +1988,8 @@ async def test_enqueue_fulfillment_raises_for_qstash_error(
     monkeypatch: Any,
 ) -> None:
     class FakeResponse:
-        status_code = 500
-
-        def raise_for_status(self) -> None:
-            raise httpx.HTTPStatusError(
-                "QStash error",
-                request=httpx.Request("POST", "https://qstash.upstash.io"),
-                response=httpx.Response(500),
-            )
+        status_code = 302
+        request = httpx.Request("POST", "https://qstash.upstash.io")
 
     class FakeAsyncClient:
         def __init__(self, timeout: float) -> None:
@@ -2025,11 +2030,14 @@ async def test_internal_fulfill_requires_qstash_signature(
     client: AsyncClient,
 ) -> None:
     response = await client.post(
-        "/internal/fulfill/test-internal-secret",
+        "/internal/fulfill",
         json={
             "order_id": 1,
             "session_id": "cs_test_123",
             "event_id": "evt_test_123",
+        },
+        headers={
+            "X-Internal-Fulfillment-Secret": "test-internal-secret",
         },
     )
 
@@ -2042,13 +2050,16 @@ async def test_internal_fulfill_rejects_invalid_qstash_signature(
     client: AsyncClient,
 ) -> None:
     response = await client.post(
-        "/internal/fulfill/test-internal-secret",
+        "/internal/fulfill",
         json={
             "order_id": 1,
             "session_id": "cs_test_123",
             "event_id": "evt_test_123",
         },
-        headers={"Upstash-Signature": "invalid"},
+        headers={
+            "Upstash-Signature": "invalid",
+            "X-Internal-Fulfillment-Secret": "test-internal-secret",
+        },
     )
 
     assert response.status_code == 401
@@ -2069,6 +2080,12 @@ async def test_internal_fulfill_verified_qstash_request_runs_fulfillment(
     ) -> str:
         return "jti_test_123"
 
+    async def fake_record_processed_qstash_message(jti: str) -> None:
+        return None
+
+    async def fake_cleanup_old_qstash_messages() -> None:
+        return None
+
     async def fake_run_fulfillment(
         order_id: int,
         session_id: str,
@@ -2081,18 +2098,29 @@ async def test_internal_fulfill_verified_qstash_request_runs_fulfillment(
         fake_verify_qstash_request,
     )
     monkeypatch.setattr(
+        "app.routers.internal.record_processed_qstash_message",
+        fake_record_processed_qstash_message,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.cleanup_old_qstash_messages",
+        fake_cleanup_old_qstash_messages,
+    )
+    monkeypatch.setattr(
         "app.routers.internal.run_fulfillment",
         fake_run_fulfillment,
     )
 
     response = await client.post(
-        "/internal/fulfill/test-internal-secret",
+        "/internal/fulfill",
         json={
             "order_id": 123,
             "session_id": "cs_test_123",
             "event_id": "evt_test_123",
         },
-        headers={"Upstash-Signature": "test-signature"},
+        headers={
+            "Upstash-Signature": "test-signature",
+            "X-Internal-Fulfillment-Secret": "test-internal-secret",
+        },
     )
 
     assert response.status_code == 200
@@ -2115,7 +2143,7 @@ async def test_internal_fulfill_rejects_replayed_qstash_message(
     ) -> str:
         return "jti_replay_test"
 
-    async def fake_reject_qstash_replay(jti: str) -> None:
+    async def fake_record_processed_qstash_message(jti: str) -> None:
         if jti in seen_jtis:
             raise HTTPException(
                 status_code=409,
@@ -2123,6 +2151,9 @@ async def test_internal_fulfill_rejects_replayed_qstash_message(
             )
 
         seen_jtis.add(jti)
+
+    async def fake_cleanup_old_qstash_messages() -> None:
+        return None
 
     async def fake_run_fulfillment(
         order_id: int,
@@ -2137,7 +2168,11 @@ async def test_internal_fulfill_rejects_replayed_qstash_message(
     )
     monkeypatch.setattr(
         "app.routers.internal.record_processed_qstash_message",
-        fake_reject_qstash_replay,
+        fake_record_processed_qstash_message,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.cleanup_old_qstash_messages",
+        fake_cleanup_old_qstash_messages,
     )
     monkeypatch.setattr(
         "app.routers.internal.run_fulfillment",
@@ -2149,17 +2184,21 @@ async def test_internal_fulfill_rejects_replayed_qstash_message(
         "session_id": "cs_test_123",
         "event_id": "evt_test_123",
     }
+    headers = {
+        "Upstash-Signature": "test-signature",
+        "X-Internal-Fulfillment-Secret": "test-internal-secret",
+    }
 
     first_response = await client.post(
-        "/internal/fulfill/test-internal-secret",
+        "/internal/fulfill",
         json=payload,
-        headers={"Upstash-Signature": "test-signature"},
+        headers=headers,
     )
 
     second_response = await client.post(
-        "/internal/fulfill/test-internal-secret",
+        "/internal/fulfill",
         json=payload,
-        headers={"Upstash-Signature": "test-signature"},
+        headers=headers,
     )
 
     assert first_response.status_code == 200
@@ -2234,3 +2273,87 @@ async def test_verify_qstash_request_returns_jti_after_valid_signature(
     )
 
     assert jti == "jti_valid"
+
+
+def qstash_signature_with_claims(claims: dict[str, Any]) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode()
+    payload = payload.rstrip("=")
+    return f"header.{payload}.signature"
+
+
+def test_decode_qstash_jti_requires_jti() -> None:
+    from app.routers.internal import decode_qstash_jti
+
+    signature = qstash_signature_with_claims({"sub": "test"})
+
+    with pytest.raises(HTTPException) as error:
+        decode_qstash_jti(signature)
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "QStash signature missing jti."
+
+
+def test_decode_qstash_jti_rejects_malformed_payload() -> None:
+    from app.routers.internal import decode_qstash_jti
+
+    with pytest.raises(HTTPException) as error:
+        decode_qstash_jti("header.not-json.signature")
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "Invalid QStash signature."
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_missing_internal_secret(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    async def fake_verify_qstash_request(**kwargs: Any) -> str:
+        return "jti_test_missing_secret"
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+
+    response = await client.post(
+        "/internal/fulfill",
+        json={"order_id": 1, "session_id": "cs_test", "event_id": "evt_test"},
+        headers={"Upstash-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_qstash_failure_callback_accepts_verified_message(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    verified: list[bytes] = []
+
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        verified.append(body)
+        assert signature == "test-signature"
+        assert destination_url == "http://test/internal/qstash-failure"
+        return "jti_failure"
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+
+    response = await client.post(
+        "/internal/qstash-failure",
+        content=b'{"error":"delivery failed"}',
+        headers={"Upstash-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+    assert verified == [b'{"error":"delivery failed"}']

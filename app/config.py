@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     internal_fulfillment_secret: str
     qstash_current_signing_key: str
     qstash_next_signing_key: str
+    internal_fulfillment_next_secret: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

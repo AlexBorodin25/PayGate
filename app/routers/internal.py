@@ -2,11 +2,13 @@ import base64
 import json
 import logging
 import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Path, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from qstash import Receiver
+from sqlalchemy import delete
 from sqlalchemy.exc import IntegrityError
 
 from app.background_tasks import run_fulfillment
@@ -51,6 +53,18 @@ def decode_qstash_jti(signature: str) -> str:
         )
 
     return jti
+
+
+def valid_internal_secret(secret: str | None) -> bool:
+    if secret is None:
+        return False
+
+    if secrets.compare_digest(secret, settings.internal_fulfillment_secret):
+        return True
+
+    next_secret = settings.internal_fulfillment_next_secret
+
+    return next_secret is not None and secrets.compare_digest(secret, next_secret)
 
 
 async def verify_qstash_request(
@@ -98,26 +112,37 @@ async def record_processed_qstash_message(jti: str) -> None:
         ) from error
 
 
+async def cleanup_old_qstash_messages() -> None:
+    cutoff = datetime.now(UTC) - timedelta(days=1)
+
+    async with standalone_session() as db:
+        await db.execute(
+            delete(ProcessedQstashMessage).where(
+                ProcessedQstashMessage.created_at < cutoff
+            )
+        )
+
+
 @router.post(
-    "/internal/fulfill/{secret}",
+    "/internal/fulfill",
     include_in_schema=False,
 )
 async def fulfill_order(
     request: Request,
-    secret: Annotated[str, Path()],
     upstash_signature: Annotated[
         str | None,
         Header(alias="Upstash-Signature"),
     ] = None,
+    internal_secret: Annotated[
+        str | None,
+        Header(alias="X-Internal-Fulfillment-Secret"),
+    ] = None,
 ) -> dict[str, bool]:
-    if not secrets.compare_digest(secret, settings.internal_fulfillment_secret):
+    if not valid_internal_secret(internal_secret):
         raise HTTPException(status_code=404, detail="Not found")
 
     body = await request.body()
-    destination_url = (
-        f"{settings.app_base_url}/internal/fulfill/"
-        f"{settings.internal_fulfillment_secret}"
-    )
+    destination_url = f"{settings.app_base_url}/internal/fulfill"
 
     jti = await verify_qstash_request(
         body=body,
@@ -134,5 +159,35 @@ async def fulfill_order(
     )
 
     await record_processed_qstash_message(jti)
+
+    try:
+        await cleanup_old_qstash_messages()
+    except Exception:
+        logger.exception("Failed to clean up old processed QStash messages.")
+
+    return {"received": True}
+
+
+@router.post(
+    "/internal/qstash-failure",
+    include_in_schema=False,
+)
+async def qstash_failure_callback(
+    request: Request,
+    upstash_signature: Annotated[
+        str | None,
+        Header(alias="Upstash-Signature"),
+    ] = None,
+) -> dict[str, bool]:
+    body = await request.body()
+    destination_url = f"{settings.app_base_url}/internal/qstash-failure"
+
+    await verify_qstash_request(
+        body=body,
+        signature=upstash_signature,
+        destination_url=destination_url,
+    )
+
+    logger.error("QStash fulfillment message exhausted retries.")
 
     return {"received": True}
