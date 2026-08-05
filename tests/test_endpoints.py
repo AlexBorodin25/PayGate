@@ -2471,3 +2471,47 @@ async def test_internal_fulfill_releases_jti_when_fulfillment_fails(
         )
 
     assert calls == ["record:jti_failure_retry", "fulfill", "release:jti_failure_retry"]
+
+
+@pytest.mark.anyio
+async def test_order_detail_requires_api_key(client: AsyncClient) -> None:
+    response = await client.get("/orders/1")
+
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_order_detail_returns_404_for_missing_order(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(
+        "/orders/999999",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Order not found."
+
+
+@pytest.mark.anyio
+async def test_order_detail_returns_order(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.get(
+        f"/orders/{order.id}",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == order.id
+    assert data["product_id"] == product.id
+    assert data["stripe_session_id"] == "cs_test_123"
+    assert data["status"] == "pending"
+    assert data["fulfillment_status"] == "pending"

@@ -151,3 +151,27 @@ async def list_orders(
         has_next=page < total_pages if include_total else has_extra_row,
         has_previous=page > 1,
     )
+
+
+@router.get(
+    "/orders/{order_id}",
+    response_model=OrderResponse,
+    summary="Get order detail",
+    description="Protected operator endpoint. Returns one order by id.",
+    responses={
+        200: {"description": "Order returned"},
+        401: {"description": "Missing or invalid X-API-Key"},
+        404: {"description": "Order not found"},
+    },
+)
+async def get_order_detail(
+    order_id: int,
+    db: DatabaseSession,
+    _: RequireOrdersApiKey,
+) -> OrderResponse:
+    order = await db.get(Order, order_id)
+
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+
+    return OrderResponse.model_validate(order)
