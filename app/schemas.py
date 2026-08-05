@@ -49,3 +49,9 @@ class OrderListResponse(BaseModel):
     total_pages: int
     has_next: bool
     has_previous: bool
+
+
+class RetryFulfillmentResponse(BaseModel):
+    order_id: int
+    queued: bool
+    fulfillment_status: FulfillmentStatus

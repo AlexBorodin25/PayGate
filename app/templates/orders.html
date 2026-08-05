@@ -40,7 +40,7 @@
                 <option value="processing">Processing</option>
                 <option value="fulfilled">Fulfilled</option>
                 <option value="payment_review">Payment review</option>
-                <option value="failed">failed</option>
+                <option value="failed">Failed</option>
             </select>
 
             <input id="product-filter" type="text" placeholder="Product ID">
@@ -106,6 +106,12 @@
         </div>
 
         <dl class="order-detail-grid" id="order-detail-grid"></dl>
+
+        <div class="order-detail-actions">
+            <button type="button" id="retry-fulfillment" disabled>
+                Retry fulfillment
+            </button>
+        </div>
     </section>
 
     <div class="pagination-controls">
@@ -126,6 +132,7 @@
     let hasNext = false;
     let sortBy = "created_at";
     let sortDirection = "desc";
+    let selectedOrderId = null;
 
     const apiKeyInput = document.getElementById("api-key");
     const statusFilter = document.getElementById("status-filter");
@@ -140,6 +147,7 @@
     const detailTitle = document.getElementById("detail-title");
     const detailGrid = document.getElementById("order-detail-grid");
     const closeDetailButton = document.getElementById("close-detail");
+    const retryFulfillmentButton = document.getElementById("retry-fulfillment");
 
     function appendDetail(label, value) {
         const term = document.createElement("dt");
@@ -195,7 +203,7 @@
     function updateSortIndicators() {
         document.querySelectorAll(".sort-indicator").forEach((indicator) => {
             if (indicator.dataset.indicator === sortBy) {
-                indicator.textContent = sortDirection === "asc" ? "↑" : "↓";
+                indicator.textContent = sortDirection === "asc" ? "ASC" : "DESC";
                 return;
             }
 
@@ -234,6 +242,12 @@
 
         const order = await response.json();
 
+        selectedOrderId = order.id;
+        retryFulfillmentButton.disabled = !(
+            order.status === "paid" &&
+            order.fulfillment_status !== "fulfilled"
+        );
+
         detailTitle.textContent = `Order #${order.id}`;
         detailGrid.textContent = "";
 
@@ -247,6 +261,41 @@
         appendDetail("Created at", formatDate(order.created_at));
 
         orderDetailPanel.hidden = false;
+    }
+
+    async function retryFulfillment() {
+        const apiKey = apiKeyInput.value.trim();
+
+        if (!apiKey || selectedOrderId === null) {
+            setEmptyState("Select an order and enter the orders API key.");
+            return;
+        }
+
+        const response = await fetch(
+            `/orders/${selectedOrderId}/retry-fulfillment`,
+            {
+                method: "POST",
+                headers: {
+                    "X-API-Key": apiKey,
+                },
+            }
+        );
+
+        if (response.status === 401) {
+            setEmptyState("The API key is missing or invalid.");
+            return;
+        }
+
+        if (!response.ok) {
+            setEmptyState(`Could not retry fulfillment. Status: ${response.status}`);
+            return;
+        }
+
+        ordersSummary.textContent =
+            `Fulfillment retry queued for order ${selectedOrderId}.`;
+
+        await loadOrderDetail(selectedOrderId);
+        await loadOrders();
     }
 
     async function loadOrders() {
@@ -308,6 +357,7 @@
             } else {
                 pageLabel.textContent = `Page ${data.page}`;
             }
+
             updateSortIndicators();
             previousButton.disabled = !data.has_previous;
             nextButton.disabled = !data.has_next;
@@ -324,6 +374,7 @@
                 appendStatusCell(row, order.fulfillment_status);
                 appendCell(row, order.stripe_payment_intent);
                 appendCell(row, formatDate(order.fulfilled_at));
+
                 const actionCell = document.createElement("td");
                 const viewButton = document.createElement("button");
 
@@ -336,6 +387,7 @@
 
                 actionCell.appendChild(viewButton);
                 row.appendChild(actionCell);
+
                 appendCell(row, formatDate(order.created_at));
 
                 ordersBody.appendChild(row);
@@ -345,8 +397,13 @@
             setEmptyState("Could not connect to the orders API.");
         }
     }
+
     closeDetailButton.addEventListener("click", () => {
         orderDetailPanel.hidden = true;
+    });
+
+    retryFulfillmentButton.addEventListener("click", () => {
+        retryFulfillment();
     });
 
     document.getElementById("load-orders").addEventListener("click", () => {
@@ -397,7 +454,6 @@
     });
 
     updateSortIndicators();
-
 </script>
 </body>
 </html>

@@ -1976,10 +1976,12 @@ async def test_enqueue_fulfillment_publishes_qstash_job(
             self,
             url: str,
             *,
+            params: dict[str, str],
             headers: dict[str, str],
             json: dict[str, Any],
         ) -> FakeResponse:
             captured_request["url"] = url
+            captured_request["params"] = params
             captured_request["headers"] = headers
             captured_request["json"] = json
             return FakeResponse()
@@ -2017,6 +2019,10 @@ async def test_enqueue_fulfillment_publishes_qstash_job(
     assert captured_request["headers"]["Upstash-Failure-Callback"] == (
         "http://test/internal/qstash-failure"
     )
+    assert captured_request["url"] == "https://qstash.upstash.io/v2/publish"
+    assert captured_request["params"] == {
+        "url": "http://test/internal/fulfill",
+    }
 
 
 @pytest.mark.anyio
@@ -2515,3 +2521,69 @@ async def test_order_detail_returns_order(
     assert data["stripe_session_id"] == "cs_test_123"
     assert data["status"] == "pending"
     assert data["fulfillment_status"] == "pending"
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_requires_api_key(client: AsyncClient) -> None:
+    response = await client.post("/orders/1/retry-fulfillment")
+
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_rejects_unpaid_order(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.post(
+        f"/orders/{order.id}/retry-fulfillment",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Only paid orders can be retried."
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_queues_failed_paid_order(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.failed
+    await db_session.commit()
+
+    queued_jobs: list[tuple[int, str, str]] = []
+
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        queued_jobs.append((order_id, session_id, event_id))
+
+    monkeypatch.setattr(
+        "app.routers.orders.enqueue_fulfillment",
+        fake_enqueue_fulfillment,
+    )
+
+    response = await client.post(
+        f"/orders/{order.id}/retry-fulfillment",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["queued"] is True
+    assert response.json()["fulfillment_status"] == "pending"
+
+    assert len(queued_jobs) == 1
+    assert queued_jobs[0][0] == order.id
+    assert queued_jobs[0][1] == "cs_test_123"
+    assert queued_jobs[0][2].startswith(f"manual_retry_{order.id}_")
