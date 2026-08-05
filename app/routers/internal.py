@@ -8,13 +8,13 @@ from typing import Annotated
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from qstash import Receiver
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.exc import IntegrityError
 
 from app.background_tasks import run_fulfillment
 from app.config import settings
 from app.db import standalone_session
-from app.models import ProcessedQstashMessage
+from app.models import FulfillmentStatus, Order, ProcessedQstashMessage
 
 router = APIRouter(tags=["Internal"])
 logger = logging.getLogger(__name__)
@@ -65,6 +65,23 @@ def valid_internal_secret(secret: str | None) -> bool:
     next_secret = settings.internal_fulfillment_next_secret
 
     return next_secret is not None and secrets.compare_digest(secret, next_secret)
+
+
+async def release_processed_qstash_message(jti: str) -> None:
+    async with standalone_session() as db:
+        await db.execute(
+            delete(ProcessedQstashMessage).where(ProcessedQstashMessage.jti == jti)
+        )
+
+
+async def mark_fulfillment_failed(order_id: int) -> None:
+    async with standalone_session() as db:
+        await db.execute(
+            update(Order)
+            .where(Order.id == order_id)
+            .where(Order.fulfillment_status != FulfillmentStatus.fulfilled)
+            .values(fulfillment_status=FulfillmentStatus.failed)
+        )
 
 
 async def verify_qstash_request(
@@ -150,15 +167,19 @@ async def fulfill_order(
         destination_url=destination_url,
     )
 
+    await record_processed_qstash_message(jti)
+
     fulfillment_request = FulfillmentRequest.model_validate_json(body)
 
-    await run_fulfillment(
-        order_id=fulfillment_request.order_id,
-        session_id=fulfillment_request.session_id,
-        event_id=fulfillment_request.event_id,
-    )
-
-    await record_processed_qstash_message(jti)
+    try:
+        await run_fulfillment(
+            order_id=fulfillment_request.order_id,
+            session_id=fulfillment_request.session_id,
+            event_id=fulfillment_request.event_id,
+        )
+    except Exception:
+        await release_processed_qstash_message(jti)
+        raise
 
     try:
         await cleanup_old_qstash_messages()
@@ -188,6 +209,16 @@ async def qstash_failure_callback(
         destination_url=destination_url,
     )
 
-    logger.error("QStash fulfillment message exhausted retries.")
+    fulfillment_request = FulfillmentRequest.model_validate_json(body)
+
+    await mark_fulfillment_failed(fulfillment_request.order_id)
+
+    logger.error(
+        "QStash fulfillment message exhausted retries for order_id=%s "
+        "session_id=%s event_id=%s",
+        fulfillment_request.order_id,
+        fulfillment_request.session_id,
+        fulfillment_request.event_id,
+    )
 
     return {"received": True}

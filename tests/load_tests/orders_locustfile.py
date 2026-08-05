@@ -22,7 +22,7 @@ class OrdersApiUser(HttpUser):
     def list_orders_with_filters(self) -> None:
         status = choice(["pending", "paid", "checkout_failed"])
         fulfillment_status = choice(
-            ["pending", "processing", "fulfilled", "payment_review"]
+            ["pending", "processing", "fulfilled", "payment_review", "failed"]
         )
 
         self.client.get(

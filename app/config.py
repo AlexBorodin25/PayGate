@@ -29,5 +29,15 @@ class Settings(BaseSettings):
             raise ValueError("Required secret cannot be blank")
         return value
 
+    @field_validator("app_base_url")
+    @classmethod
+    def app_base_url_without_trailing_slash(cls, value: str) -> str:
+        cleaned_value = value.strip().rstrip("/")
+
+        if not cleaned_value:
+            raise ValueError("APP_BASE_URL cannot be blank")
+
+        return cleaned_value
+
 
 settings = Settings()  # type: ignore[call-arg]
