@@ -21,9 +21,9 @@ from app.routers import internal as internal_router
 from app.routers import products as products_router
 from app.routers import webhooks as webhooks_router
 from app.routers.checkout import release_expired_reservations
+from app.routers.orders import retry_fulfillment
 from app.services.fulfillment import fulfillment_service
 from app.services.products import format_price, get_product, list_products
-from app.routers.orders import retry_fulfillment
 
 
 async def add_test_product(db_session: AsyncSession) -> Product:
@@ -2587,6 +2587,7 @@ async def test_retry_fulfillment_queues_failed_paid_order(
     assert queued_jobs[0][1] == "cs_test_123"
     assert queued_jobs[0][2].startswith(f"manual_retry_{order.id}_")
 
+
 @pytest.mark.anyio
 async def test_retry_fulfillment_direct_returns_404_for_missing_order(
     db_session: AsyncSession,
@@ -2600,6 +2601,7 @@ async def test_retry_fulfillment_direct_returns_404_for_missing_order(
 
     assert error.value.status_code == 404
     assert error.value.detail == "Order not found."
+
 
 @pytest.mark.anyio
 async def test_retry_fulfillment_direct_rejects_fulfilled_order(
@@ -2621,6 +2623,7 @@ async def test_retry_fulfillment_direct_rejects_fulfilled_order(
     assert error.value.status_code == 409
     assert error.value.detail == "Order is already fulfilled."
 
+
 @pytest.mark.anyio
 async def test_retry_fulfillment_direct_rejects_missing_session_id(
     db_session: AsyncSession,
@@ -2641,6 +2644,7 @@ async def test_retry_fulfillment_direct_rejects_missing_session_id(
 
     assert error.value.status_code == 409
     assert error.value.detail == "Order is missing a Stripe session id."
+
 
 @pytest.mark.anyio
 async def test_retry_fulfillment_direct_restores_status_when_enqueue_fails(
