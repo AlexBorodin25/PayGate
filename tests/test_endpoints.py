@@ -23,6 +23,7 @@ from app.routers import webhooks as webhooks_router
 from app.routers.checkout import release_expired_reservations
 from app.services.fulfillment import fulfillment_service
 from app.services.products import format_price, get_product, list_products
+from app.routers.orders import retry_fulfillment
 
 
 async def add_test_product(db_session: AsyncSession) -> Product:
@@ -1976,12 +1977,10 @@ async def test_enqueue_fulfillment_publishes_qstash_job(
             self,
             url: str,
             *,
-            params: dict[str, str],
             headers: dict[str, str],
             json: dict[str, Any],
         ) -> FakeResponse:
             captured_request["url"] = url
-            captured_request["params"] = params
             captured_request["headers"] = headers
             captured_request["json"] = json
             return FakeResponse()
@@ -2007,7 +2006,8 @@ async def test_enqueue_fulfillment_publishes_qstash_job(
         "session_id": "cs_test_123",
         "event_id": "evt_test_123",
     }
-    assert "qstash.upstash.io/v2/publish" in captured_request["url"]
+    assert "/v2/publish/" in captured_request["url"]
+    assert captured_request["url"].endswith("/http://test/internal/fulfill")
     assert captured_request["headers"][
         "Upstash-Forward-X-Internal-Fulfillment-Secret"
     ] == ("test-internal-secret")
@@ -2019,10 +2019,8 @@ async def test_enqueue_fulfillment_publishes_qstash_job(
     assert captured_request["headers"]["Upstash-Failure-Callback"] == (
         "http://test/internal/qstash-failure"
     )
-    assert captured_request["url"] == "https://qstash.upstash.io/v2/publish"
-    assert captured_request["params"] == {
-        "url": "http://test/internal/fulfill",
-    }
+    assert captured_request["url"].endswith("/http://test/internal/fulfill")
+    assert "/v2/publish/" in captured_request["url"]
 
 
 @pytest.mark.anyio
@@ -2032,6 +2030,7 @@ async def test_enqueue_fulfillment_raises_for_qstash_error(
     class FakeResponse:
         status_code = 302
         request = httpx.Request("POST", "https://qstash.upstash.io")
+        text = "redirect"
 
     class FakeAsyncClient:
         def __init__(self, timeout: float) -> None:
@@ -2587,3 +2586,99 @@ async def test_retry_fulfillment_queues_failed_paid_order(
     assert queued_jobs[0][0] == order.id
     assert queued_jobs[0][1] == "cs_test_123"
     assert queued_jobs[0][2].startswith(f"manual_retry_{order.id}_")
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_returns_404_for_missing_order(
+    db_session: AsyncSession,
+) -> None:
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=999999,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 404
+    assert error.value.detail == "Order not found."
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_rejects_fulfilled_order(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.fulfilled
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=order.id,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Order is already fulfilled."
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_rejects_missing_session_id(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.failed
+    order.stripe_session_id = None
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=order.id,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Order is missing a Stripe session id."
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_restores_status_when_enqueue_fails(
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order_id = order.id
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.failed
+    await db_session.commit()
+
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        raise httpx.ConnectError("qstash unavailable")
+
+    monkeypatch.setattr(
+        "app.routers.orders.enqueue_fulfillment",
+        fake_enqueue_fulfillment,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=order_id,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Fulfillment retry could not be queued."
+
+    db_session.expire_all()
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.fulfillment_status == FulfillmentStatus.failed
