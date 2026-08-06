@@ -1,12 +1,15 @@
 import asyncio
+import base64
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,9 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import background_tasks
 from app.models import FulfillmentStatus, Order, OrderStatus, Product
 from app.routers import checkout as checkout_router
+from app.routers import internal as internal_router
 from app.routers import products as products_router
 from app.routers import webhooks as webhooks_router
 from app.routers.checkout import release_expired_reservations
+from app.routers.orders import retry_fulfillment
 from app.services.fulfillment import fulfillment_service
 from app.services.products import format_price, get_product, list_products
 
@@ -64,6 +69,20 @@ def fake_checkout_completed_event(
             )
         ),
     )
+
+
+def make_unsigned_qstash_signature(payload: dict[str, Any]) -> str:
+    encoded_header = (
+        base64.urlsafe_b64encode(json.dumps({"alg": "HS256"}).encode())
+        .decode()
+        .rstrip("=")
+    )
+
+    encoded_payload = (
+        base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    )
+
+    return f"{encoded_header}.{encoded_payload}.signature"
 
 
 async def add_test_order(
@@ -654,94 +673,6 @@ async def test_webhook_ignores_unpaid_checkout(
 
 
 @pytest.mark.anyio
-async def test_webhook_marks_order_paid_and_fulfilled(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: Any,
-) -> None:
-    product = await add_test_product(db_session)
-    order = await add_test_order(db_session, product)
-
-    order_id = order.id
-    product_id = product.id
-    product_price = product.price
-    product_currency = product.currency
-
-    await db_session.rollback()
-
-    delivered_orders = []
-
-    async def fake_deliver_product(order_id: int) -> None:
-        delivered_orders.append(order_id)
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr(
-        background_tasks.fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        background_tasks,
-        "standalone_session",
-        fake_standalone_session,
-    )
-    monkeypatch.setattr(
-        webhooks_router.stripe.Webhook,
-        "construct_event",
-        lambda payload, sig_header, secret: fake_checkout_completed_event(
-            event_id="evt_test_paid",
-            order_id=order_id,
-            product_id=product_id,
-            amount=product_price,
-            currency=product_currency.lower(),
-            session_id="cs_test_123",
-            payment_intent="pi_test_123",
-        ),
-    )
-
-    assert order.stripe_session_id == "cs_test_123"
-    assert order.product_id == product_id
-    assert order.amount == product_price
-    assert order.currency.lower() == product_currency.lower()
-    assert order.livemode is False
-
-    response = await client.post(
-        "/webhooks/stripe",
-        content=b"{}",
-        headers={"Stripe-Signature": "test-signature"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"received": True}
-
-    db_session.expire_all()
-
-    updated_order = await db_session.get(Order, order_id)
-    updated_product = await db_session.get(Product, product_id)
-
-    assert updated_order is not None
-    assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
-    assert updated_order.fulfilled_at is not None
-    assert updated_order.stripe_payment_intent == "pi_test_123"
-
-    assert updated_product is not None
-    assert updated_product.quantity == 10
-
-    assert delivered_orders == [order_id]
-
-
-@pytest.mark.anyio
 async def test_webhook_does_not_fulfill_on_currency_mismatch(
     client: AsyncClient,
     db_session: AsyncSession,
@@ -919,10 +850,9 @@ async def test_webhook_missing_order_returns_200(
 
 
 @pytest.mark.anyio
-async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
+async def test_webhook_late_payment_with_stock_marks_paid_and_enqueues_fulfillment(
     client: AsyncClient,
     db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: Any,
 ) -> None:
     product = await add_test_product(db_session)
@@ -948,30 +878,20 @@ async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
 
     await db_session.rollback()
 
-    delivered_orders = []
+    queued_jobs: list[tuple[int, str, str]] = []
 
-    async def fake_deliver_product(order_id: int) -> None:
-        delivered_orders.append(order_id)
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        queued_jobs.append((order_id, session_id, event_id))
 
     monkeypatch.setattr(
-        background_tasks.fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        background_tasks,
-        "standalone_session",
-        fake_standalone_session,
+        webhooks_router,
+        "enqueue_fulfillment",
+        fake_enqueue_fulfillment,
     )
     monkeypatch.setattr(
         webhooks_router.stripe.Webhook,
@@ -987,12 +907,6 @@ async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
         ),
     )
 
-    assert order.stripe_session_id == "cs_test_late_with_stock"
-    assert order.product_id == product_id
-    assert order.amount == product_price
-    assert order.currency.lower() == product_currency.lower()
-    assert order.livemode is False
-
     response = await client.post(
         "/webhooks/stripe",
         content=b"{}",
@@ -1000,23 +914,72 @@ async def test_webhook_late_payment_with_stock_marks_paid_and_fulfills(
     )
 
     assert response.status_code == 200
+    assert queued_jobs == [
+        (order_id, "cs_test_late_with_stock", "evt_test_late_with_stock")
+    ]
 
     db_session.expire_all()
-
     updated_order = await db_session.get(Order, order_id)
     updated_product = await db_session.get(Product, product_id)
 
     assert updated_order is not None
     assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
-    assert updated_order.fulfilled_at is not None
-    assert updated_order.stock_reserved is False
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
     assert updated_order.stripe_payment_intent == "pi_test_late_with_stock"
-
+    assert updated_order.stock_reserved is False
     assert updated_product is not None
     assert updated_product.quantity == 0
 
-    assert delivered_orders == [order_id]
+
+@pytest.mark.anyio
+async def test_fulfillment_failure_leaves_order_pending(
+    db_session: AsyncSession,
+    test_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    order_id = order.id
+    await db_session.rollback()
+
+    async def fail_delivery(order_id: int) -> None:
+        raise RuntimeError("delivery failed")
+
+    @asynccontextmanager
+    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
+        async with test_sessionmaker() as db:
+            try:
+                yield db
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(
+        background_tasks.fulfillment_service,
+        "deliver_product",
+        fail_delivery,
+    )
+    monkeypatch.setattr(
+        background_tasks,
+        "standalone_session",
+        fake_standalone_session,
+    )
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await background_tasks.run_fulfillment(
+            order_id,
+            "cs_test_123",
+            "evt_test_delivery_fails",
+        )
+
+    db_session.expire_all()
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.fulfillment_status == FulfillmentStatus.pending
+    assert updated_order.fulfilled_at is None
 
 
 @pytest.mark.anyio
@@ -1090,84 +1053,6 @@ async def test_webhook_late_payment_without_stock_goes_to_payment_review(
 
     assert updated_product is not None
     assert updated_product.quantity == 0
-
-
-@pytest.mark.anyio
-async def test_fulfillment_failure_leaves_order_pending(
-    client: AsyncClient,
-    db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: Any,
-) -> None:
-    product = await add_test_product(db_session)
-    order = await add_test_order(db_session, product)
-
-    order_id = order.id
-    product_id = product.id
-    product_price = product.price
-    product_currency = product.currency
-
-    await db_session.rollback()
-
-    async def fail_delivery(order_id: int) -> None:
-        raise RuntimeError("delivery failed")
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr(
-        background_tasks.fulfillment_service,
-        "deliver_product",
-        fail_delivery,
-    )
-    monkeypatch.setattr(
-        background_tasks,
-        "standalone_session",
-        fake_standalone_session,
-    )
-    monkeypatch.setattr(
-        webhooks_router.stripe.Webhook,
-        "construct_event",
-        lambda payload, sig_header, secret: SimpleNamespace(
-            id="evt_test_delivery_fails",
-            type="checkout.session.completed",
-            data=SimpleNamespace(
-                object=SimpleNamespace(
-                    id="cs_test_123",
-                    payment_status="paid",
-                    client_reference_id=str(order_id),
-                    metadata={"product_id": product_id},
-                    amount_total=product_price,
-                    currency=product_currency.lower(),
-                    livemode=False,
-                    payment_intent="pi_test_123",
-                )
-            ),
-        ),
-    )
-
-    response = await client.post(
-        "/webhooks/stripe",
-        content=b"{}",
-        headers={"Stripe-Signature": "test-signature"},
-    )
-
-    assert response.status_code == 200
-
-    db_session.expire_all()
-    updated_order = await db_session.get(Order, order_id)
-
-    assert updated_order is not None
-    assert updated_order.status == OrderStatus.paid
-    assert updated_order.fulfillment_status == FulfillmentStatus.pending
-    assert updated_order.fulfilled_at is None
 
 
 @pytest.mark.anyio
@@ -1667,8 +1552,19 @@ async def test_orders_support_pagination_and_filters(
         fulfillment_status=FulfillmentStatus.pending,
         livemode=False,
     )
+    failed_order = Order(
+        product_id=product.id,
+        stripe_session_id="cs_test_failed",
+        amount=4999,
+        currency="USD",
+        status=OrderStatus.paid,
+        fulfillment_status=FulfillmentStatus.failed,
+        livemode=False,
+    )
 
-    db_session.add_all([first_paid_order, second_paid_order, pending_order])
+    db_session.add_all(
+        [first_paid_order, second_paid_order, pending_order, failed_order]
+    )
     await db_session.commit()
 
     response = await client.get(
@@ -1719,86 +1615,30 @@ async def test_orders_support_pagination_and_filters(
     assert second_page["has_previous"] is True
     assert len(second_page["items"]) == 1
 
-
-@pytest.mark.anyio
-async def test_stripe_webhook_directly_covers_paid_transaction(
-    db_session: AsyncSession,
-    test_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: Any,
-) -> None:
-    product = await add_test_product(db_session)
-    order = await add_test_order(db_session, product)
-
-    order_id = order.id
-    product_id = product.id
-    product_price = product.price
-    product_currency = product.currency
-
-    await db_session.rollback()
-
-    class FakeRequest:
-        async def body(self) -> bytes:
-            return b"{}"
-
-    delivered_orders = []
-
-    async def fake_deliver_product(order_id: int) -> None:
-        delivered_orders.append(order_id)
-
-    @asynccontextmanager
-    async def fake_standalone_session() -> AsyncIterator[AsyncSession]:
-        async with test_sessionmaker() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr(
-        fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        fulfillment_service,
-        "deliver_product",
-        fake_deliver_product,
-    )
-    monkeypatch.setattr(
-        webhooks_router.stripe.Webhook,
-        "construct_event",
-        lambda payload, sig_header, secret: fake_checkout_completed_event(
-            event_id="evt_direct_paid",
-            order_id=order_id,
-            product_id=product_id,
-            amount=product_price,
-            currency=product_currency.lower(),
-            session_id="cs_test_123",
-            payment_intent="pi_direct_paid",
+    failed_response = await client.get(
+        (
+            "/orders?page=1&page_size=10"
+            "&status=paid"
+            "&fulfillment_status=failed"
+            "&product_id=speaker"
         ),
+        headers={"X-API-Key": "test"},
     )
 
-    background_tasks = BackgroundTasks()
+    assert failed_response.status_code == 200
 
-    response = await webhooks_router.stripe_webhook(
-        request=FakeRequest(),
-        db=db_session,
-        background_tasks=background_tasks,
-        sig_header="test-signature",
-    )
+    failed_data = failed_response.json()
 
-    await background_tasks()
-
-    db_session.expire_all()
-    updated_order = await db_session.get(Order, order_id)
-
-    assert response == {"received": True}
-    assert updated_order is not None
-    assert updated_order.status == OrderStatus.paid
-    assert updated_order.stripe_payment_intent == "pi_direct_paid"
-    assert updated_order.fulfillment_status == FulfillmentStatus.fulfilled
-    assert delivered_orders == [order_id]
+    assert failed_data["page"] == 1
+    assert failed_data["page_size"] == 10
+    assert failed_data["total"] == 1
+    assert failed_data["total_pages"] == 1
+    assert failed_data["has_next"] is False
+    assert failed_data["has_previous"] is False
+    assert len(failed_data["items"]) == 1
+    assert failed_data["items"][0]["status"] == "paid"
+    assert failed_data["items"][0]["fulfillment_status"] == "failed"
+    assert failed_data["items"][0]["product_id"] == "speaker"
 
 
 @pytest.mark.anyio
@@ -1936,3 +1776,913 @@ async def test_orders_reject_invalid_sort_direction(client: AsyncClient) -> None
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_orders_can_skip_total_count(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+
+    db_session.add_all(
+        [
+            Order(
+                product_id=product.id,
+                stripe_session_id=f"cs_test_skip_total_{index}",
+                amount=4999,
+                currency="USD",
+                status=OrderStatus.paid,
+                fulfillment_status=FulfillmentStatus.fulfilled,
+                livemode=False,
+            )
+            for index in range(3)
+        ]
+    )
+    await db_session.commit()
+
+    response = await client.get(
+        "/orders?page=1&page_size=2&include_total=false",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data["items"]) == 2
+    assert data["total"] == 0
+    assert data["total_pages"] == 0
+    assert data["has_next"] is True
+    assert data["has_previous"] is False
+
+
+@pytest.mark.anyio
+async def test_webhook_marks_order_paid_and_enqueues_fulfillment(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order_id = order.id
+    product_id = product.id
+    await db_session.commit()
+
+    queued_jobs: list[tuple[int, str, str]] = []
+
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        queued_jobs.append((order_id, session_id, event_id))
+
+    monkeypatch.setattr(
+        webhooks_router,
+        "enqueue_fulfillment",
+        fake_enqueue_fulfillment,
+    )
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_test_paid",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product.price,
+            currency=product.currency.lower(),
+            session_id="cs_test_123",
+            payment_intent="pi_test_123",
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert queued_jobs == [(order_id, "cs_test_123", "evt_test_paid")]
+
+
+@pytest.mark.anyio
+async def test_webhook_returns_503_when_qstash_enqueue_fails(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order_id = order.id
+    product_id = product.id
+    await db_session.commit()
+
+    async def fail_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        raise httpx.ConnectError("qstash unavailable")
+
+    monkeypatch.setattr(
+        webhooks_router,
+        "enqueue_fulfillment",
+        fail_enqueue_fulfillment,
+    )
+
+    monkeypatch.setattr(
+        webhooks_router.stripe.Webhook,
+        "construct_event",
+        lambda payload, sig_header, secret: fake_checkout_completed_event(
+            event_id="evt_test_qstash_fails",
+            order_id=order_id,
+            product_id=product_id,
+            amount=product.price,
+            currency=product.currency.lower(),
+            session_id="cs_test_123",
+            payment_intent="pi_test_123",
+        ),
+    )
+
+    response = await client.post(
+        "/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_wrong_secret(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    called = False
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    response = await client.post(
+        "/internal/fulfill/wrong-secret",
+        json={
+            "order_id": 1,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+    )
+
+    assert response.status_code == 404
+    assert called is False
+
+
+@pytest.mark.anyio
+async def test_enqueue_fulfillment_publishes_qstash_job(
+    monkeypatch: Any,
+) -> None:
+    captured_request: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, timeout: float) -> None:
+            captured_request["timeout"] = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> FakeResponse:
+            captured_request["url"] = url
+            captured_request["headers"] = headers
+            captured_request["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.qstash.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+
+    from app.services.qstash import enqueue_fulfillment
+
+    await enqueue_fulfillment(
+        order_id=123,
+        session_id="cs_test_123",
+        event_id="evt_test_123",
+    )
+
+    assert captured_request["timeout"] == 5.0
+    assert captured_request["headers"]["Authorization"].startswith("Bearer ")
+    assert captured_request["headers"]["Content-Type"] == "application/json"
+    assert captured_request["json"] == {
+        "order_id": 123,
+        "session_id": "cs_test_123",
+        "event_id": "evt_test_123",
+    }
+    assert "/v2/publish/" in captured_request["url"]
+    assert captured_request["url"].endswith("/http://test/internal/fulfill")
+    assert captured_request["headers"][
+        "Upstash-Forward-X-Internal-Fulfillment-Secret"
+    ] == ("test-internal-secret")
+    assert captured_request["headers"]["Upstash-Retries"] == "3"
+    assert (
+        captured_request["headers"]["Upstash-Retry-Delay"]
+        == "exp(2.5 * retried) * 1000"
+    )
+    assert captured_request["headers"]["Upstash-Failure-Callback"] == (
+        "http://test/internal/qstash-failure"
+    )
+    assert captured_request["url"].endswith("/http://test/internal/fulfill")
+    assert "/v2/publish/" in captured_request["url"]
+
+
+@pytest.mark.anyio
+async def test_enqueue_fulfillment_raises_for_qstash_error(
+    monkeypatch: Any,
+) -> None:
+    class FakeResponse:
+        status_code = 302
+        request = httpx.Request("POST", "https://qstash.upstash.io")
+        text = "redirect"
+
+    class FakeAsyncClient:
+        def __init__(self, timeout: float) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            json: dict[str, Any],
+        ) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.qstash.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+
+    from app.services.qstash import enqueue_fulfillment
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await enqueue_fulfillment(
+            order_id=123,
+            session_id="cs_test_123",
+            event_id="evt_test_123",
+        )
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_requires_qstash_signature(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/internal/fulfill",
+        json={
+            "order_id": 1,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+        headers={
+            "X-Internal-Fulfillment-Secret": "test-internal-secret",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "QStash signature is required."
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_invalid_qstash_signature(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/internal/fulfill",
+        json={
+            "order_id": 1,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+        headers={
+            "Upstash-Signature": "invalid",
+            "X-Internal-Fulfillment-Secret": "test-internal-secret",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_verified_qstash_request_runs_fulfillment(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    fulfilled_jobs: list[tuple[int, str, str]] = []
+
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        return "jti_test_123"
+
+    async def fake_cleanup_old_qstash_messages() -> None:
+        return None
+
+    calls: list[str] = []
+
+    async def fake_record_processed_qstash_message(jti: str) -> None:
+        calls.append(f"record:{jti}")
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        calls.append("fulfill")
+        fulfilled_jobs.append((order_id, session_id, event_id))
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.record_processed_qstash_message",
+        fake_record_processed_qstash_message,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.cleanup_old_qstash_messages",
+        fake_cleanup_old_qstash_messages,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    response = await client.post(
+        "/internal/fulfill",
+        json={
+            "order_id": 123,
+            "session_id": "cs_test_123",
+            "event_id": "evt_test_123",
+        },
+        headers={
+            "Upstash-Signature": "test-signature",
+            "X-Internal-Fulfillment-Secret": "test-internal-secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+    assert fulfilled_jobs == [(123, "cs_test_123", "evt_test_123")]
+    assert calls == ["record:jti_test_123", "fulfill"]
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_replayed_qstash_message(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    seen_jtis: set[str] = set()
+
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        return "jti_replay_test"
+
+    async def fake_record_processed_qstash_message(jti: str) -> None:
+        if jti in seen_jtis:
+            raise HTTPException(
+                status_code=409,
+                detail="QStash message replay rejected.",
+            )
+
+        seen_jtis.add(jti)
+
+    async def fake_cleanup_old_qstash_messages() -> None:
+        return None
+
+    fulfilled_jobs: list[int] = []
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        fulfilled_jobs.append(order_id)
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.record_processed_qstash_message",
+        fake_record_processed_qstash_message,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.cleanup_old_qstash_messages",
+        fake_cleanup_old_qstash_messages,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    payload = {
+        "order_id": 123,
+        "session_id": "cs_test_123",
+        "event_id": "evt_test_123",
+    }
+    headers = {
+        "Upstash-Signature": "test-signature",
+        "X-Internal-Fulfillment-Secret": "test-internal-secret",
+    }
+
+    first_response = await client.post(
+        "/internal/fulfill",
+        json=payload,
+        headers=headers,
+    )
+
+    second_response = await client.post(
+        "/internal/fulfill",
+        json=payload,
+        headers=headers,
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "QStash message replay rejected."
+    assert fulfilled_jobs == [123]
+
+
+def test_decode_qstash_jti_returns_jti() -> None:
+    signature = make_unsigned_qstash_signature({"jti": "jti_test_123"})
+
+    assert internal_router.decode_qstash_jti(signature) == "jti_test_123"
+
+
+def test_decode_qstash_jti_rejects_malformed_signature() -> None:
+    with pytest.raises(HTTPException) as error:
+        internal_router.decode_qstash_jti("not-a-jwt")
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "Invalid QStash signature."
+
+
+def test_decode_qstash_jti_rejects_invalid_payload() -> None:
+    signature = "header.not-valid-base64.signature"
+
+    with pytest.raises(HTTPException) as error:
+        internal_router.decode_qstash_jti(signature)
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "Invalid QStash signature."
+
+
+def test_decode_qstash_jti_rejects_missing_jti() -> None:
+    signature = make_unsigned_qstash_signature({"sub": "missing-jti"})
+
+    with pytest.raises(HTTPException) as error:
+        internal_router.decode_qstash_jti(signature)
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "QStash signature missing jti."
+
+
+@pytest.mark.anyio
+async def test_verify_qstash_request_returns_jti_after_valid_signature(
+    monkeypatch: Any,
+) -> None:
+    class FakeReceiver:
+        def __init__(
+            self,
+            *,
+            current_signing_key: str,
+            next_signing_key: str,
+        ) -> None:
+            pass
+
+        def verify(
+            self,
+            *,
+            body: str,
+            signature: str,
+            url: str,
+        ) -> None:
+            return None
+
+    monkeypatch.setattr(internal_router, "Receiver", FakeReceiver)
+
+    signature = make_unsigned_qstash_signature({"jti": "jti_valid"})
+
+    jti = await internal_router.verify_qstash_request(
+        body=b"{}", signature=signature, destination_url="http://test/internal/fulfill"
+    )
+
+    assert jti == "jti_valid"
+
+
+def qstash_signature_with_claims(claims: dict[str, Any]) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode()
+    payload = payload.rstrip("=")
+    return f"header.{payload}.signature"
+
+
+def test_decode_qstash_jti_requires_jti() -> None:
+    from app.routers.internal import decode_qstash_jti
+
+    signature = qstash_signature_with_claims({"sub": "test"})
+
+    with pytest.raises(HTTPException) as error:
+        decode_qstash_jti(signature)
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "QStash signature missing jti."
+
+
+def test_decode_qstash_jti_rejects_malformed_payload() -> None:
+    from app.routers.internal import decode_qstash_jti
+
+    with pytest.raises(HTTPException) as error:
+        decode_qstash_jti("header.not-json.signature")
+
+    assert error.value.status_code == 401
+    assert error.value.detail == "Invalid QStash signature."
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_rejects_missing_internal_secret(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    async def fake_verify_qstash_request(**kwargs: Any) -> str:
+        return "jti_test_missing_secret"
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+
+    response = await client.post(
+        "/internal/fulfill",
+        json={"order_id": 1, "session_id": "cs_test", "event_id": "evt_test"},
+        headers={"Upstash-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_qstash_failure_callback_accepts_verified_message(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    body = b'{"order_id":123,"session_id":"cs_test_123","event_id":"evt_test_123"}'
+    verified: list[bytes] = []
+    failed_orders: list[int] = []
+
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        verified.append(body)
+        assert signature == "test-signature"
+        assert destination_url == "http://test/internal/qstash-failure"
+        return "jti_failure"
+
+    async def fake_mark_fulfillment_failed(order_id: int) -> None:
+        failed_orders.append(order_id)
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.mark_fulfillment_failed",
+        fake_mark_fulfillment_failed,
+    )
+
+    response = await client.post(
+        "/internal/qstash-failure",
+        content=body,
+        headers={"Upstash-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+    assert verified == [body]
+    assert failed_orders == [123]
+
+
+@pytest.mark.anyio
+async def test_internal_fulfill_releases_jti_when_fulfillment_fails(
+    client: AsyncClient,
+    monkeypatch: Any,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_verify_qstash_request(
+        *,
+        body: bytes,
+        signature: str | None,
+        destination_url: str,
+    ) -> str:
+        return "jti_failure_retry"
+
+    async def fake_record_processed_qstash_message(jti: str) -> None:
+        calls.append(f"record:{jti}")
+
+    async def fake_release_processed_qstash_message(jti: str) -> None:
+        calls.append(f"release:{jti}")
+
+    async def fake_run_fulfillment(
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        calls.append("fulfill")
+        raise RuntimeError("delivery failed")
+
+    monkeypatch.setattr(
+        "app.routers.internal.verify_qstash_request",
+        fake_verify_qstash_request,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.record_processed_qstash_message",
+        fake_record_processed_qstash_message,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.release_processed_qstash_message",
+        fake_release_processed_qstash_message,
+    )
+    monkeypatch.setattr(
+        "app.routers.internal.run_fulfillment",
+        fake_run_fulfillment,
+    )
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await client.post(
+            "/internal/fulfill",
+            json={
+                "order_id": 123,
+                "session_id": "cs_test_123",
+                "event_id": "evt_test_123",
+            },
+            headers={
+                "Upstash-Signature": "test-signature",
+                "X-Internal-Fulfillment-Secret": "test-internal-secret",
+            },
+        )
+
+    assert calls == ["record:jti_failure_retry", "fulfill", "release:jti_failure_retry"]
+
+
+@pytest.mark.anyio
+async def test_order_detail_requires_api_key(client: AsyncClient) -> None:
+    response = await client.get("/orders/1")
+
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_order_detail_returns_404_for_missing_order(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(
+        "/orders/999999",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Order not found."
+
+
+@pytest.mark.anyio
+async def test_order_detail_returns_order(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.get(
+        f"/orders/{order.id}",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == order.id
+    assert data["product_id"] == product.id
+    assert data["stripe_session_id"] == "cs_test_123"
+    assert data["status"] == "pending"
+    assert data["fulfillment_status"] == "pending"
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_requires_api_key(client: AsyncClient) -> None:
+    response = await client.post("/orders/1/retry-fulfillment")
+
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_rejects_unpaid_order(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+
+    response = await client.post(
+        f"/orders/{order.id}/retry-fulfillment",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Only paid orders can be retried."
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_queues_failed_paid_order(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.failed
+    await db_session.commit()
+
+    queued_jobs: list[tuple[int, str, str]] = []
+
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        queued_jobs.append((order_id, session_id, event_id))
+
+    monkeypatch.setattr(
+        "app.routers.orders.enqueue_fulfillment",
+        fake_enqueue_fulfillment,
+    )
+
+    response = await client.post(
+        f"/orders/{order.id}/retry-fulfillment",
+        headers={"X-API-Key": "test"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["queued"] is True
+    assert response.json()["fulfillment_status"] == "pending"
+
+    assert len(queued_jobs) == 1
+    assert queued_jobs[0][0] == order.id
+    assert queued_jobs[0][1] == "cs_test_123"
+    assert queued_jobs[0][2].startswith(f"manual_retry_{order.id}_")
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_returns_404_for_missing_order(
+    db_session: AsyncSession,
+) -> None:
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=999999,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 404
+    assert error.value.detail == "Order not found."
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_rejects_fulfilled_order(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.fulfilled
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=order.id,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Order is already fulfilled."
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_rejects_missing_session_id(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.failed
+    order.stripe_session_id = None
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=order.id,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Order is missing a Stripe session id."
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_restores_status_when_enqueue_fails(
+    db_session: AsyncSession,
+    monkeypatch: Any,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order_id = order.id
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.failed
+    await db_session.commit()
+
+    async def fake_enqueue_fulfillment(
+        *,
+        order_id: int,
+        session_id: str,
+        event_id: str,
+    ) -> None:
+        raise httpx.ConnectError("qstash unavailable")
+
+    monkeypatch.setattr(
+        "app.routers.orders.enqueue_fulfillment",
+        fake_enqueue_fulfillment,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=order_id,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Fulfillment retry could not be queued."
+
+    db_session.expire_all()
+    updated_order = await db_session.get(Order, order_id)
+
+    assert updated_order is not None
+    assert updated_order.fulfillment_status == FulfillmentStatus.failed

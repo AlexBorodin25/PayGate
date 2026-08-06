@@ -61,3 +61,5 @@ async def run_fulfillment(order_id: int, session_id: str, event_id: str) -> None
             session_id,
             event_id,
         )
+
+        raise

@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import checkout, orders, pages, products, webhooks
+from app.routers import checkout, internal, orders, pages, products, webhooks
 
 app = FastAPI(
     title="PayGate",
@@ -16,6 +16,7 @@ app.include_router(checkout.router)
 app.include_router(webhooks.router)
 app.include_router(pages.router)
 app.include_router(orders.router)
+app.include_router(internal.router)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 

@@ -2,14 +2,14 @@ import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
+import httpx
 import stripe
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.background_tasks import run_fulfillment
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -19,6 +19,7 @@ from app.models import (
     ProcessedWebhookEvent,
     Product,
 )
+from app.services.qstash import enqueue_fulfillment
 
 router = APIRouter(tags=["Stripe Webhooks"])
 logger = logging.getLogger(__name__)
@@ -31,18 +32,18 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
     summary="Receive Stripe webhook events",
     description=(
         "Verifies the Stripe signature, processes paid checkout.session.completed "
-        "events, reconciles the Stripe session against the stored order, and updates "
-        "payment and fulfillment state."
+        "events, reconciles the Stripe session against the stored order, updates "
+        "payment state, and enqueues fulfillment through QStash."
     ),
     responses={
         400: {"description": "Invalid, or unverifiable Stripe webhook payload"},
         500: {"description": "Temporary database error"},
+        503: {"description": "Fulfillment could not be queued"},
     },
 )
 async def stripe_webhook(
     request: Request,
     db: DatabaseSession,
-    background_tasks: BackgroundTasks,
     sig_header: str | None = Header(default=None, alias="Stripe-Signature"),
 ) -> dict[str, bool]:
     if sig_header is None:
@@ -289,11 +290,16 @@ async def stripe_webhook(
         ) from error
 
     if should_schedule_fulfillment:
-        background_tasks.add_task(
-            run_fulfillment,
-            parsed_order_id,
-            session.id,
-            event_id,
-        )
+        try:
+            await enqueue_fulfillment(
+                order_id=parsed_order_id,
+                session_id=session.id,
+                event_id=event_id,
+            )
+        except httpx.HTTPError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="Fulfillment could not be queued.",
+            ) from error
 
     return {"received": True}

@@ -40,6 +40,7 @@
                 <option value="processing">Processing</option>
                 <option value="fulfilled">Fulfilled</option>
                 <option value="payment_review">Payment review</option>
+                <option value="failed">Failed</option>
             </select>
 
             <input id="product-filter" type="text" placeholder="Product ID">
@@ -83,6 +84,7 @@
                 </th>
                 <th>Payment Intent</th>
                 <th>Fulfilled At</th>
+                <th>Actions</th>
                 <th>
                     <button type="button" class="table-sort" data-sort="created_at">
                         Created <span class="sort-indicator" data-indicator="created_at"></span>
@@ -92,6 +94,24 @@
             </thead>
             <tbody id="orders-body"></tbody>
         </table>
+    </section>
+
+    <section class="order-detail-panel" id="order-detail-panel" hidden>
+        <div class="order-detail-header">
+            <div>
+                <p class="status-eyebrow">Order detail</p>
+                <h2 id="detail-title">Order</h2>
+            </div>
+            <button type="button" class="secondary-button" id="close-detail">Close</button>
+        </div>
+
+        <dl class="order-detail-grid" id="order-detail-grid"></dl>
+
+        <div class="order-detail-actions">
+            <button type="button" id="retry-fulfillment" disabled>
+                Retry fulfillment
+            </button>
+        </div>
     </section>
 
     <div class="pagination-controls">
@@ -112,6 +132,7 @@
     let hasNext = false;
     let sortBy = "created_at";
     let sortDirection = "desc";
+    let selectedOrderId = null;
 
     const apiKeyInput = document.getElementById("api-key");
     const statusFilter = document.getElementById("status-filter");
@@ -122,6 +143,22 @@
     const pageLabel = document.getElementById("page-label");
     const previousButton = document.getElementById("previous-page");
     const nextButton = document.getElementById("next-page");
+    const orderDetailPanel = document.getElementById("order-detail-panel");
+    const detailTitle = document.getElementById("detail-title");
+    const detailGrid = document.getElementById("order-detail-grid");
+    const closeDetailButton = document.getElementById("close-detail");
+    const retryFulfillmentButton = document.getElementById("retry-fulfillment");
+
+    function appendDetail(label, value) {
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+
+        term.textContent = label;
+        description.textContent = value || "";
+
+        detailGrid.appendChild(term);
+        detailGrid.appendChild(description);
+    }
 
     function formatDate(value) {
         if (!value) {
@@ -166,12 +203,99 @@
     function updateSortIndicators() {
         document.querySelectorAll(".sort-indicator").forEach((indicator) => {
             if (indicator.dataset.indicator === sortBy) {
-                indicator.textContent = sortDirection === "asc" ? "↑" : "↓";
+                indicator.textContent = sortDirection === "asc" ? "ASC" : "DESC";
                 return;
             }
 
             indicator.textContent = "";
         });
+    }
+
+    async function loadOrderDetail(orderId) {
+        const apiKey = apiKeyInput.value.trim();
+
+        if (!apiKey) {
+            setEmptyState("Enter the orders API key.");
+            return;
+        }
+
+        const response = await fetch(`/orders/${orderId}`, {
+            headers: {
+                "X-API-Key": apiKey,
+            },
+        });
+
+        if (response.status === 401) {
+            setEmptyState("The API key is missing or invalid.");
+            return;
+        }
+
+        if (response.status === 404) {
+            setEmptyState("Order not found.");
+            return;
+        }
+
+        if (!response.ok) {
+            setEmptyState(`Could not load order detail. Status: ${response.status}`);
+            return;
+        }
+
+        const order = await response.json();
+
+        selectedOrderId = order.id;
+        retryFulfillmentButton.disabled = !(
+            order.status === "paid" &&
+            order.fulfillment_status !== "fulfilled"
+        );
+
+        detailTitle.textContent = `Order #${order.id}`;
+        detailGrid.textContent = "";
+
+        appendDetail("Product ID", order.product_id);
+        appendDetail("Amount", formatAmount(order.amount, order.currency));
+        appendDetail("Payment status", order.status);
+        appendDetail("Fulfillment status", order.fulfillment_status);
+        appendDetail("Stripe session", order.stripe_session_id);
+        appendDetail("Payment intent", order.stripe_payment_intent);
+        appendDetail("Fulfilled at", formatDate(order.fulfilled_at));
+        appendDetail("Created at", formatDate(order.created_at));
+
+        orderDetailPanel.hidden = false;
+    }
+
+    async function retryFulfillment() {
+        const apiKey = apiKeyInput.value.trim();
+
+        if (!apiKey || selectedOrderId === null) {
+            setEmptyState("Select an order and enter the orders API key.");
+            return;
+        }
+
+        const response = await fetch(
+            `/orders/${selectedOrderId}/retry-fulfillment`,
+            {
+                method: "POST",
+                headers: {
+                    "X-API-Key": apiKey,
+                },
+            }
+        );
+
+        if (response.status === 401) {
+            setEmptyState("The API key is missing or invalid.");
+            return;
+        }
+
+        if (!response.ok) {
+            setEmptyState(`Could not retry fulfillment. Status: ${response.status}`);
+            return;
+        }
+
+        ordersSummary.textContent =
+            `Fulfillment retry queued for order ${selectedOrderId}.`;
+
+        await loadOrderDetail(selectedOrderId);
+        await loadOrders();
     }
 
     async function loadOrders() {
@@ -183,8 +307,9 @@
         }
 
         const params = new URLSearchParams({
-            page: String(page),
+            page: page.toString(),
             page_size: "10",
+            include_total: "false",
         });
 
         params.set("sort_by", sortBy);
@@ -225,9 +350,14 @@
             page = data.page;
 
             ordersSummary.textContent =
-                `${data.total} orders found. Showing page ${data.page} of ${data.total_pages || 1}.`;
+                `${data.items.length} orders shown. Showing page ${data.page}.`;
 
-            pageLabel.textContent = `Page ${data.page}`;
+            if (data.total_pages > 0) {
+                pageLabel.textContent = `Page ${data.page} of ${data.total_pages}`;
+            } else {
+                pageLabel.textContent = `Page ${data.page}`;
+            }
+
             updateSortIndicators();
             previousButton.disabled = !data.has_previous;
             nextButton.disabled = !data.has_next;
@@ -244,6 +374,20 @@
                 appendStatusCell(row, order.fulfillment_status);
                 appendCell(row, order.stripe_payment_intent);
                 appendCell(row, formatDate(order.fulfilled_at));
+
+                const actionCell = document.createElement("td");
+                const viewButton = document.createElement("button");
+
+                viewButton.type = "button";
+                viewButton.className = "table-action";
+                viewButton.textContent = "View";
+                viewButton.addEventListener("click", () => {
+                    loadOrderDetail(order.id);
+                });
+
+                actionCell.appendChild(viewButton);
+                row.appendChild(actionCell);
+
                 appendCell(row, formatDate(order.created_at));
 
                 ordersBody.appendChild(row);
@@ -253,6 +397,14 @@
             setEmptyState("Could not connect to the orders API.");
         }
     }
+
+    closeDetailButton.addEventListener("click", () => {
+        orderDetailPanel.hidden = true;
+    });
+
+    retryFulfillmentButton.addEventListener("click", () => {
+        retryFulfillment();
+    });
 
     document.getElementById("load-orders").addEventListener("click", () => {
         page = 1;
@@ -302,7 +454,6 @@
     });
 
     updateSortIndicators();
-
 </script>
 </body>
 </html>
