@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" xmlns="http://www.w3.org/1999/html">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -37,9 +37,25 @@
             </article>
         {% endfor %}
     </section>
+
+    <div class="pagination-controls">
+        {% if has_previous %}
+            <a class="link-button" href="/?page={{ page - 1 }}">Previous</a>
+        {% else %}
+            <button type="button" disabled>Previous</button>
+        {% endif %}
+
+        <span>Page {{ page }} of {{ total_pages }}</span>
+
+        {% if has_next %}
+            <a class="link-button" href="/?page={{ page + 1 }}">Next</a>
+        {% else %}
+            <button type="button" disabled>Next</button>
+        {% endif %}
+    </div>
 </main>
 
-<footer class ="site-footer">
+<footer class="site-footer">
     <div class="footer-inner">
         PayGate checkout demo. Use card number 4242 4242 4242 4242 at checkout.
     </div>

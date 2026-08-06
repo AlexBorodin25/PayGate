@@ -391,3 +391,42 @@ button:disabled {
     border-radius: 8px;
     box-shadow: 0 10px 28px rgba(24, 32, 47, 0.08);
 }
+
+.quick-filter-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.secondary-button {
+    width: auto;
+    border: 1px solid #c9d3e4;
+    background: #ffffff;
+    color: #1d4ed8;
+}
+
+.secondary-button:hover {
+    background: #eef4ff;
+}
+
+#api-key {
+    order: 1;
+}
+
+#status-filter {
+    order: 2;
+}
+
+#fulfillment-filter {
+    order: 3;
+}
+
+#product-filter {
+    order: 4;
+}
+
+#load-orders {
+    order: 5;
+}

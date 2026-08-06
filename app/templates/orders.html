@@ -43,15 +43,27 @@
                 <option value="failed">Failed</option>
             </select>
 
-            <input id="product-filter" type="text" placeholder="Product ID">
-
-            <button type="button" id="needs-attention-failed">
-                Needs attention: Failed
-            </button>
-            <button type="button" id="needs-attention-review">
-                Needs attention: Review
-            </button>
             <button type="button" id="load-orders">Load</button>
+
+            <input id="product-filter" type="text" placeholder="Product ID">
+        </div>
+
+            <div class="quick-filter-actions">
+                <button
+                    type="button"
+                    class="secondary-button"
+                    id="needs-attention-failed"
+                >
+                    Failed fulfillment
+                </button>
+                <button
+                    type="button"
+                    class="secondary-button"
+                    id="needs-attention-review"
+                >
+                    Payment review
+                </button>
+            </div>
         </div>
     </section>
 
