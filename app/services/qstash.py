@@ -7,8 +7,6 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-publish_url = f"{settings.qstash_publish_url}/{destination}"
-
 
 async def enqueue_fulfillment(
     *,
@@ -18,7 +16,7 @@ async def enqueue_fulfillment(
 ) -> None:
     destination = f"{settings.app_base_url}/internal/fulfill"
     failure_callback = f"{settings.app_base_url}/internal/qstash-failure"
-    publish_url = f"{QSTASH_PUBLISH_URL}/{destination}"
+    publish_url = f"{settings.qstash_publish_url}/{destination}"
 
     payload: dict[str, Any] = {
         "order_id": order_id,
