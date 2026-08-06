@@ -19,9 +19,11 @@ os.environ["DATABASE_URL"] = (
     "postgresql+asyncpg://postgres:postgres@localhost:5433/paygate_test"
 )
 os.environ["QSTASH_TOKEN"] = "test-qstash-token"
-os.environ["INTERNAL_FULFILLMENT_SECRET"] = "test-internal-secret"
 os.environ["QSTASH_CURRENT_SIGNING_KEY"] = "test-current-signing-key"
 os.environ["QSTASH_NEXT_SIGNING_KEY"] = "test-next-signing-key"
+os.environ["QSTASH_PUBLISH_URL"] = "https://qstash-us-east-1.upstash.io/v2/publish"
+os.environ["INTERNAL_FULFILLMENT_SECRET"] = "test-internal-secret"
+os.environ["INTERNAL_FULFILLMENT_NEXT_SECRET"] = "test-next-internal-secret"
 
 from app.db import get_db
 from app.main import app
