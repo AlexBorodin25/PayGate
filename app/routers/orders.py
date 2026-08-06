@@ -1,6 +1,7 @@
 import logging
 from math import ceil
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.templating import Jinja2Templates
@@ -10,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models import FulfillmentStatus, Order, OrderStatus
-from app.schemas import OrderListResponse, OrderResponse
+from app.schemas import OrderListResponse, OrderResponse, RetryFulfillmentResponse
 from app.security import require_orders_api_key
+from app.services.qstash import enqueue_fulfillment
 
 router = APIRouter(tags=["Orders"])
 templates = Jinja2Templates(directory="app/templates")
@@ -150,4 +152,102 @@ async def list_orders(
         total_pages=total_pages,
         has_next=page < total_pages if include_total else has_extra_row,
         has_previous=page > 1,
+    )
+
+
+@router.get(
+    "/orders/{order_id}",
+    response_model=OrderResponse,
+    summary="Get order detail",
+    description="Protected operator endpoint. Returns one order by id.",
+    responses={
+        200: {"description": "Order returned"},
+        401: {"description": "Missing or invalid X-API-Key"},
+        404: {"description": "Order not found"},
+    },
+)
+async def get_order_detail(
+    order_id: int,
+    db: DatabaseSession,
+    _: RequireOrdersApiKey,
+) -> OrderResponse:
+    order = await db.get(Order, order_id)
+
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+
+    return OrderResponse.model_validate(order)
+
+
+@router.post(
+    "/orders/{order_id}/retry-fulfillment",
+    response_model=RetryFulfillmentResponse,
+    summary="Retry order fulfillment",
+    description=(
+        "Protected operator endpoint. Re-queues fulfillment for a paid order "
+        "that is not already fulfilled."
+    ),
+    responses={
+        200: {"description": "Fulfillment retry queued"},
+        401: {"description": "Missing or invalid X-API-Key"},
+        404: {"description": "Order not found"},
+        409: {"description": "Order is not eligible for fulfillment retry"},
+        503: {"description": "Fulfillment retry could not be queued"},
+    },
+)
+async def retry_fulfillment(
+    order_id: int,
+    db: DatabaseSession,
+    _: RequireOrdersApiKey,
+) -> RetryFulfillmentResponse:
+    order = await db.get(Order, order_id)
+
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+
+    if order.status != OrderStatus.paid:
+        raise HTTPException(
+            status_code=409,
+            detail="Only paid orders can be retried.",
+        )
+
+    if order.fulfillment_status == FulfillmentStatus.fulfilled:
+        raise HTTPException(
+            status_code=409,
+            detail="Order is already fulfilled.",
+        )
+
+    if order.stripe_session_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Order is missing a Stripe session id.",
+        )
+
+    previous_fulfillment_status = order.fulfillment_status
+    order.fulfillment_status = FulfillmentStatus.pending
+    await db.commit()
+
+    try:
+        await enqueue_fulfillment(
+            order_id=order.id,
+            session_id=order.stripe_session_id,
+            event_id=f"manual_retry_{order.id}_{uuid4()}",
+        )
+    except Exception as error:
+        order.fulfillment_status = previous_fulfillment_status
+        await db.commit()
+
+        logger.exception(
+            "Manual fulfillment retry enqueue failed order_id=%s",
+            order.id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Fulfillment retry could not be queued.",
+        ) from error
+
+    return RetryFulfillmentResponse(
+        order_id=order.id,
+        queued=True,
+        fulfillment_status=order.fulfillment_status,
     )

@@ -1,16 +1,11 @@
 import logging
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
-
-QSTASH_PUBLISH_URL = "https://qstash.upstash.io/v2/publish"
-
-failure_callback = f"{settings.app_base_url}/internal/qstash-failure"
 
 
 async def enqueue_fulfillment(
@@ -20,7 +15,8 @@ async def enqueue_fulfillment(
     event_id: str,
 ) -> None:
     destination = f"{settings.app_base_url}/internal/fulfill"
-    encoded_destination = quote(destination, safe="")
+    failure_callback = f"{settings.app_base_url}/internal/qstash-failure"
+    publish_url = f"{settings.qstash_publish_url}/{destination}"
 
     payload: dict[str, Any] = {
         "order_id": order_id,
@@ -41,7 +37,7 @@ async def enqueue_fulfillment(
 
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.post(
-            f"{QSTASH_PUBLISH_URL}/{encoded_destination}",
+            publish_url,
             headers=headers,
             json=payload,
         )
@@ -49,11 +45,13 @@ async def enqueue_fulfillment(
     if not 200 <= response.status_code < 300:
         logger.error(
             "QStash enqueue failed for order_id=%s session_id=%s event_id=%s "
-            "status_code=%s",
+            "status_code=%s publish_url=%s response_body=%s",
             order_id,
             session_id,
             event_id,
             response.status_code,
+            publish_url,
+            response.text,
         )
         raise httpx.HTTPStatusError(
             "QStash enqueue failed",
