@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     qstash_current_signing_key: str
     qstash_next_signing_key: str
     internal_fulfillment_next_secret: str | None = None
+    qstash_publish_url: str = Field(
+        default="https://qstash.upstash.io/v2/publish",
+        alias="QSTASH_PUBLISH_URL",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -36,6 +40,16 @@ class Settings(BaseSettings):
 
         if not cleaned_value:
             raise ValueError("APP_BASE_URL cannot be blank")
+
+        return cleaned_value
+
+    @field_validator("qstash_publish_url")
+    @classmethod
+    def qstash_publish_url_without_trailing_slash(cls, value: str) -> str:
+        cleaned_value = value.strip().rstrip("/")
+
+        if not cleaned_value:
+            raise ValueError("QSTASH_PUBLISH_URL cannot be blank")
 
         return cleaned_value
 

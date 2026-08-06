@@ -7,7 +7,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-QSTASH_PUBLISH_URL = "https://qstash-us-east-1.upstash.io/v2/publish"
+publish_url = f"{settings.qstash_publish_url}/{destination}"
 
 
 async def enqueue_fulfillment(
