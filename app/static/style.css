@@ -1,3 +1,4 @@
+Replace your full app/static/style.css with this cleaned-up version. It fixes the broken duplicate CSS near .table-action, puts Load before Product ID, and forces all product images to the same size.
 :root {
     color-scheme: light;
     font-family: Inter, system-ui, "Segoe UI", sans-serif;
@@ -48,6 +49,17 @@ body {
     gap: 18px;
 }
 
+.nav-space a {
+    color: #1d4ed8;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.nav-space a:hover {
+    color: #173ea9;
+    text-decoration: underline;
+}
+
 main {
     width: 100%;
     max-width: 1120px;
@@ -69,11 +81,37 @@ main {
 
 .product-card {
     padding: 22px;
+    display: flex;
+    flex-direction: column;
 }
 
 .product-card h2 {
     margin: 0 0 10px;
     font-size: 1.2rem;
+}
+
+.product-card form {
+    margin-top: auto;
+}
+
+.product-image {
+    display: block;
+    width: 100%;
+    height: 190px;
+    object-fit: cover;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    background: #eef2f8;
+    border: 1px solid #dde3ee;
+}
+
+.product-image-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #596579;
+    font-size: 2rem;
+    font-weight: 700;
 }
 
 .description {
@@ -119,7 +157,6 @@ button:hover,
     background: #173ea9;
 }
 
-
 button:disabled {
     background: #9aa6bb;
     cursor: not-allowed;
@@ -162,17 +199,6 @@ button:disabled {
     line-height: 1.6;
 }
 
-.nav-space a {
-    color: #1d4ed8;
-    font-weight: 700;
-    text-decoration: none;
-}
-
-.nav-space a:hover {
-    color: #173ea9;
-    text-decoration: underline;
-}
-
 .orders-toolbar {
     margin-bottom: 20px;
 }
@@ -183,7 +209,12 @@ button:disabled {
 
 .orders-controls {
     display: grid;
-    grid-template-columns: minmax(220px, 1.5fr) minmax(160px, 1fr) minmax(180px, 1fr) minmax(140px, 1fr) 96px;
+    grid-template-columns:
+        minmax(220px, 1.5fr)
+        minmax(160px, 1fr)
+        minmax(180px, 1fr)
+        96px
+        minmax(140px, 1fr);
     gap: 12px;
     align-items: center;
 }
@@ -201,6 +232,34 @@ button:disabled {
 
 .orders-controls button {
     min-height: 42px;
+}
+
+#api-key {
+    order: 1;
+}
+
+#status-filter {
+    order: 2;
+}
+
+#fulfillment-filter {
+    order: 3;
+}
+
+#load-orders {
+    order: 4;
+}
+
+#product-filter {
+    order: 5;
+}
+
+.quick-filter-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 12px;
 }
 
 .orders-summary {
@@ -237,6 +296,31 @@ button:disabled {
     border-bottom: 0;
 }
 
+.table-sort {
+    width: auto;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: #334155;
+    font: inherit;
+    font-weight: 750;
+    cursor: pointer;
+}
+
+.table-sort:hover {
+    color: #1d4ed8;
+    background: transparent;
+    text-decoration: underline;
+}
+
+.sort-indicator {
+    display: inline-block;
+    min-width: 14px;
+    margin-left: 4px;
+    color: #1d4ed8;
+    font-weight: 800;
+}
+
 .status-badge {
     display: inline-block;
     border-radius: 999px;
@@ -261,7 +345,8 @@ button:disabled {
 }
 
 .status-checkout-failed,
-.status-payment-review {
+.status-payment-review,
+.status-failed {
     background: #fee2e2;
     color: #991b1b;
 }
@@ -282,41 +367,6 @@ button:disabled {
 #page-label {
     color: #596579;
     font-weight: 700;
-}
-
-@media (max-width: 900px) {
-    .orders-controls {
-        grid-template-columns: 1fr;
-    }
-
-    .nav-space {
-        min-width: auto;
-    }
-}
-
-.table-sort {
-    width: auto;
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: #334155;
-    font: inherit;
-    font-weight: 750;
-    cursor: pointer;
-}
-
-.table-sort:hover {
-    color: #1d4ed8;
-    background: transparent;
-    text-decoration: underline;
-}
-
-.sort-indicator {
-    display: inline-block;
-    min-width: 14px;
-    margin-left: 4px;
-    color: #1d4ed8;
-    font-weight: 800;
 }
 
 .order-detail-panel {
@@ -360,16 +410,17 @@ button:disabled {
     width: auto;
     padding: 8px 12px;
     font-size: 0.85rem;
-}   font-size: 0.85rem;
 }
 
 .secondary-button {
-    background: #e2e8f0;
-    color: #334155;
+    width: auto;
+    border: 1px solid #c9d3e4;
+    background: #ffffff;
+    color: #1d4ed8;
 }
 
 .secondary-button:hover {
-    background: #cbd5e1;
+    background: #eef4ff;
 }
 
 .order-detail-actions {
@@ -392,60 +443,12 @@ button:disabled {
     box-shadow: 0 10px 28px rgba(24, 32, 47, 0.08);
 }
 
-.quick-filter-actions {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    flex-wrap: wrap;
-    margin-top: 12px;
-}
+@media (max-width: 900px) {
+    .orders-controls {
+        grid-template-columns: 1fr;
+    }
 
-.secondary-button {
-    width: auto;
-    border: 1px solid #c9d3e4;
-    background: #ffffff;
-    color: #1d4ed8;
-}
-
-.secondary-button:hover {
-    background: #eef4ff;
-}
-
-#api-key {
-    order: 1;
-}
-
-#status-filter {
-    order: 2;
-}
-
-#fulfillment-filter {
-    order: 3;
-}
-
-#product-filter {
-    order: 4;
-}
-
-#load-orders {
-    order: 5;
-}
-
-.product-image {
-    width: 100%;
-    aspect-ratio: 16 / 10;
-    object-fit: cover;
-    border-radius: 6px;
-    margin-bottom: 16px;
-    background: #eef2f8;
-    border: 1px solid #dde3ee;
-}
-
-.product-image-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #596579;
-    font-size: 2rem;
-    font-weight: 700;
+    .nav-space {
+        min-width: auto;
+    }
 }
