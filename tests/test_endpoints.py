@@ -131,6 +131,7 @@ async def test_products_endpoint(
                 currency="USD",
                 description="A waterproof Bluetooth speaker.",
                 quantity=10,
+                image_url=None,
             ),
             SimpleNamespace(
                 id="laptop",
@@ -139,6 +140,7 @@ async def test_products_endpoint(
                 currency="USD",
                 description="A business laptop.",
                 quantity=5,
+                image_url=None,
             ),
             SimpleNamespace(
                 id="camera",
@@ -147,6 +149,7 @@ async def test_products_endpoint(
                 currency="USD",
                 description="A 33MP full-frame mirrorless camera.",
                 quantity=3,
+                image_url=None,
             ),
         ]
 
@@ -166,6 +169,7 @@ async def test_products_endpoint(
     assert products[0]["description"] == "A waterproof Bluetooth speaker."
     assert products[0]["quantity"] == 10
     assert products[0]["display_price"] == "49.99 USD"
+    assert products[0]["image_url"] is None
 
 
 @pytest.mark.anyio
@@ -1060,7 +1064,7 @@ async def test_orders_requires_api_key(client: AsyncClient) -> None:
     response = await client.get("/orders")
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Missing API key"
+    assert response.json()["detail"] == "Missing or invalid API key"
 
 
 @pytest.mark.anyio
@@ -1071,7 +1075,7 @@ async def test_orders_reject_wrong_api_key(client: AsyncClient) -> None:
     )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid API key"
+    assert response.json()["detail"] == "Missing or invalid API key"
 
 
 @pytest.mark.anyio
@@ -2621,7 +2625,7 @@ async def test_retry_fulfillment_direct_rejects_fulfilled_order(
         )
 
     assert error.value.status_code == 409
-    assert error.value.detail == "Order is already fulfilled."
+    assert error.value.detail == "Order is not eligible for fulfillment retry."
 
 
 @pytest.mark.anyio
@@ -2718,3 +2722,49 @@ async def test_products_page_paginates_six_products(
     assert second_page.text.count("Test product") == 1
     assert "Page 1 of 2" in first_page.text
     assert "Page 2 of 2" in second_page.text
+
+
+@pytest.mark.anyio
+async def test_products_page_renders_product_image(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity=10,
+        image_url="https://example.com/speaker.jpg",
+        is_deleted=False,
+    )
+    db_session.add(product)
+    await db_session.commit()
+
+    response = await client.get("/")
+
+    assert response.status_code == 200
+    assert "https://example.com/speaker.jpg" in response.text
+    assert 'alt="Portable Speaker"' in response.text
+
+
+@pytest.mark.anyio
+async def test_retry_fulfillment_direct_rejects_processing_order(
+    db_session: AsyncSession,
+) -> None:
+    product = await add_test_product(db_session)
+    order = await add_test_order(db_session, product)
+    order.status = OrderStatus.paid
+    order.fulfillment_status = FulfillmentStatus.processing
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await retry_fulfillment(
+            order_id=order.id,
+            db=db_session,
+            _=None,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Order is not eligible for fulfillment retry."

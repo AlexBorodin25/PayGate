@@ -6,7 +6,11 @@ from app.routers import checkout, internal, orders, pages, products, webhooks
 
 app = FastAPI(
     title="PayGate",
-    description="A Stripe Checkout payment service for digital products.",
+    description=(
+        "A Stripe Checkout payment service with stock reservation, "
+        "verified webhook payment reconciliation, durable QStash fulfillment, "
+        "and protected operator order management."
+    ),
 )
 
 app.state.settings = settings

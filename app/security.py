@@ -1,16 +1,19 @@
 import secrets
 from typing import Annotated
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import APIKeyHeader
 
 from app.config import settings
 
+orders_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-async def require_orders_api_key(
-    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+
+def require_orders_api_key(
+    api_key: Annotated[str | None, Depends(orders_api_key_header)],
 ) -> None:
-    if x_api_key is None:
-        raise HTTPException(status_code=401, detail="Missing API key")
-
-    if not secrets.compare_digest(x_api_key, settings.orders_api_key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    if api_key is None or not secrets.compare_digest(
+        api_key,
+        settings.orders_api_key,
+    ):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")

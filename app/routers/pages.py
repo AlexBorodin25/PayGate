@@ -55,6 +55,7 @@ async def product_page(
                     "description": product.description,
                     "display_price": format_price(product.price, product.currency),
                     "quantity": product.quantity,
+                    "image_url": product.image_url,
                 }
                 for product in products
             ],

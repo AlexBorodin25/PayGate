@@ -106,7 +106,8 @@ async def restore_reserved_stock(
     description=(
         "Creates a pending order and Stripe Checkout Session for a product. "
         "The client sends only a product id. Price and currency are resolved "
-        "server-side. Stock is reserved for 10 minutes before checkout starts."
+        "server-side. Stock is reserved for 10 minutes before checkout starts. "
+        "If Stripe checkout creation fails, reserved stock is restored."
     ),
     responses={
         404: {"description": "Product not found"},
@@ -246,7 +247,14 @@ async def cancel(
     )
 
 
-@router.get("/checkout-sessions/{session_id}/status")
+@router.get(
+    "/checkout-sessions/{session_id}/status",
+    summary="Get checkout session order status",
+    description=(
+        "Returns payment and fulfillment status for the order attached to "
+        "a Stripe Checkout Session id. Used by success and cancel pages for polling."
+    ),
+)
 async def checkout_session_status(
     session_id: str,
     db: DatabaseSession,
