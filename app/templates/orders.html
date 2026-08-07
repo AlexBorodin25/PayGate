@@ -48,22 +48,21 @@
             <input id="product-filter" type="text" placeholder="Product ID">
         </div>
 
-            <div class="quick-filter-actions">
-                <button
-                    type="button"
-                    class="secondary-button"
-                    id="needs-attention-failed"
-                >
-                    Failed fulfillment
-                </button>
-                <button
-                    type="button"
-                    class="secondary-button"
-                    id="needs-attention-review"
-                >
-                    Payment review
-                </button>
-            </div>
+        <div class="quick-filter-actions">
+            <button
+                type="button"
+                class="secondary-button"
+                id="needs-attention-failed"
+            >
+                Failed fulfillment
+            </button>
+            <button
+                type="button"
+                class="secondary-button"
+                id="needs-attention-review"
+            >
+                Payment review
+            </button>
         </div>
     </section>
 
@@ -126,10 +125,12 @@
         <dl class="order-detail-grid" id="order-detail-grid"></dl>
 
         <div class="order-detail-actions">
-            <button type="button" id="retry-fulfillment" disabled>
+            <button id="retry-fulfillment" type="button" hidden>
                 Retry fulfillment
             </button>
         </div>
+
+        <p id="retry-feedback" class="retry-feedback" hidden></p>
     </section>
 
     <div class="pagination-controls">
@@ -166,6 +167,7 @@
     const detailGrid = document.getElementById("order-detail-grid");
     const closeDetailButton = document.getElementById("close-detail");
     const retryFulfillmentButton = document.getElementById("retry-fulfillment");
+    const retryFeedback = document.getElementById("retry-feedback");
 
     function appendDetail(label, value) {
         const term = document.createElement("dt");
@@ -260,7 +262,12 @@
 
         const order = await response.json();
 
+        retryFeedback.hidden = true;
+        retryFeedback.textContent = "";
+        retryFeedback.className = "retry-feedback";
+
         selectedOrderId = order.id;
+        retryFulfillmentButton.hidden = false;
         retryFulfillmentButton.disabled = !(
             order.status === "paid" &&
             ["pending", "failed", "payment_review"].includes(
@@ -281,41 +288,6 @@
         appendDetail("Created at", formatDate(order.created_at));
 
         orderDetailPanel.hidden = false;
-    }
-
-    async function retryFulfillment() {
-        const apiKey = apiKeyInput.value.trim();
-
-        if (!apiKey || selectedOrderId === null) {
-            setEmptyState("Select an order and enter the orders API key.");
-            return;
-        }
-
-        const response = await fetch(
-            `/orders/${selectedOrderId}/retry-fulfillment`,
-            {
-                method: "POST",
-                headers: {
-                    "X-API-Key": apiKey,
-                },
-            }
-        );
-
-        if (response.status === 401) {
-            setEmptyState("The API key is missing or invalid.");
-            return;
-        }
-
-        if (!response.ok) {
-            setEmptyState(`Could not retry fulfillment. Status: ${response.status}`);
-            return;
-        }
-
-        ordersSummary.textContent =
-            `Fulfillment retry queued for order ${selectedOrderId}.`;
-
-        await loadOrderDetail(selectedOrderId);
-        await loadOrders();
     }
 
     async function loadOrders() {
@@ -422,8 +394,65 @@
         orderDetailPanel.hidden = true;
     });
 
-    retryFulfillmentButton.addEventListener("click", () => {
-        retryFulfillment();
+    retryFulfillmentButton.addEventListener("click", async () => {
+        if (!selectedOrderId) {
+            return;
+        }
+
+        retryFulfillmentButton.disabled = true;
+        retryFeedback.hidden = false;
+        retryFeedback.className = "retry-feedback";
+        retryFeedback.textContent = "Queueing fulfillment retry...";
+
+        try {
+            const response = await fetch(
+                `/orders/${selectedOrderId}/retry-fulfillment`,
+                {
+                    method: "POST",
+                    headers: {
+                        "X-API-Key": apiKeyInput.value.trim(),
+                    },
+                }
+            );
+
+            if (response.status === 401) {
+                retryFeedback.className = "retry-feedback retry-feedback-error";
+                retryFeedback.textContent = "The API key is missing or invalid.";
+                return;
+            }
+
+            if (response.status === 409) {
+                const error = await response.json();
+
+                retryFeedback.className = "retry-feedback retry-feedback-error";
+                retryFeedback.textContent = error.detail;
+                return;
+            }
+
+            if (!response.ok) {
+                retryFeedback.className = "retry-feedback retry-feedback-error";
+                retryFeedback.textContent =
+                    `Could not queue retry. Status: ${response.status}`;
+                return;
+            }
+
+            const data = await response.json();
+
+            await loadOrderDetail(selectedOrderId);
+            await loadOrders();
+
+            retryFeedback.hidden = false;
+            retryFeedback.className = "retry-feedback retry-feedback-success";
+            retryFeedback.textContent = data.queued
+                ? "Fulfillment retry queued."
+                : "Fulfillment retry was not queued.";
+        } catch (error) {
+            console.error(error);
+            retryFeedback.className = "retry-feedback retry-feedback-error";
+            retryFeedback.textContent = "Could not connect to the orders API.";
+        } finally {
+            retryFulfillmentButton.disabled = false;
+        }
     });
 
     document.getElementById("needs-attention-failed").addEventListener("click", () => {

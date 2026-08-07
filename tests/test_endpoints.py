@@ -2768,3 +2768,38 @@ async def test_retry_fulfillment_direct_rejects_processing_order(
 
     assert error.value.status_code == 409
     assert error.value.detail == "Order is not eligible for fulfillment retry."
+
+
+@pytest.mark.anyio
+async def test_products_page_searches_by_name(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    keyboard = Product(
+        id="keyboard",
+        name="Mechanical Keyboard",
+        price=8999,
+        currency="USD",
+        description="A compact keyboard.",
+        quantity=5,
+        is_deleted=False,
+    )
+    mouse = Product(
+        id="mouse",
+        name="Wireless Mouse",
+        price=3999,
+        currency="USD",
+        description="A lightweight mouse.",
+        quantity=5,
+        is_deleted=False,
+    )
+
+    db_session.add_all([keyboard, mouse])
+    await db_session.commit()
+
+    response = await client.get("/?search=keyboard")
+
+    assert response.status_code == 200
+    assert "Mechanical Keyboard" in response.text
+    assert "Wireless Mouse" not in response.text
+    assert 'value="keyboard"' in response.text

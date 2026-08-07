@@ -24,20 +24,26 @@ async def product_page(
     request: Request,
     db: DatabaseSession,
     page: Annotated[int, Query(ge=1)] = 1,
+    search: str | None = None,
 ) -> Response:  # pragma: no cover
+    search = search.strip() if search else None
+
     page_size = 6
     offset = (page - 1) * page_size
 
-    total = await db.scalar(
-        select(func.count()).select_from(Product).where(Product.is_deleted.is_(False))
-    )
+    filters = [Product.is_deleted.is_(False)]
+
+    if search:
+        filters.append(Product.name.ilike(f"%{search}%"))
+
+    total = await db.scalar(select(func.count()).select_from(Product).where(*filters))
     total = total or 0
     total_pages = ceil(total / page_size) if total else 1
 
     products = (
         await db.scalars(
             select(Product)
-            .where(Product.is_deleted.is_(False))
+            .where(*filters)
             .order_by(Product.id.asc())
             .offset(offset)
             .limit(page_size)
@@ -59,6 +65,7 @@ async def product_page(
                 }
                 for product in products
             ],
+            "search": search or "",
             "page": page,
             "total_pages": total_pages,
             "has_previous": page > 1,
