@@ -33,7 +33,7 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
     description=(
         "Verifies the Stripe signature, processes paid checkout.session.completed "
         "events, reconciles the Stripe session against the stored order, updates "
-        "payment state, and enqueues fulfillment through QStash."
+        "payment state, handles late payments, and enqueues fulfillment through QStash."
     ),
     responses={
         400: {"description": "Invalid, or unverifiable Stripe webhook payload"},

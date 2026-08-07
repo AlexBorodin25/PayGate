@@ -52,7 +52,9 @@ async def orders_page(request: Request) -> Response:
     summary="List orders",
     description=(
         "Protected operator endpoint. Returns paginated orders with optional "
-        "status, fulfillment_status, and product_id filters."
+        "status, fulfillment_status, and product_id filters. Supports sorting "
+        "with sort_by and sort_direction. Set include_total=false for high-load "
+        "pagination to skip COUNT(*) and use one extra row to determine has_next."
     ),
     responses={
         200: {"description": "Orders returned"},
@@ -185,7 +187,8 @@ async def get_order_detail(
     summary="Retry order fulfillment",
     description=(
         "Protected operator endpoint. Re-queues fulfillment for a paid order "
-        "that is not already fulfilled."
+        "with pending, failed, or payment_review fulfillment status. Already "
+        "fulfilled or currently processing orders cannot be retried."
     ),
     responses={
         200: {"description": "Fulfillment retry queued"},
@@ -211,10 +214,16 @@ async def retry_fulfillment(
             detail="Only paid orders can be retried.",
         )
 
-    if order.fulfillment_status == FulfillmentStatus.fulfilled:
+    retryable_statuses = {
+        FulfillmentStatus.pending,
+        FulfillmentStatus.failed,
+        FulfillmentStatus.payment_review,
+    }
+
+    if order.fulfillment_status not in retryable_statuses:
         raise HTTPException(
             status_code=409,
-            detail="Order is already fulfilled.",
+            detail="Order is not eligible for fulfillment retry.",
         )
 
     if order.stripe_session_id is None:

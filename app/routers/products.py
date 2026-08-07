@@ -15,7 +15,10 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 @router.get(
     "/products",
     summary="List available products",
-    description="Returns products that are not soft-deleted.",
+    description=(
+        "Returns active products available for checkout, including price, "
+        "stock quantity, display price, and optional image URL."
+    ),
 )
 async def get_products(db: DatabaseSession) -> list[ProductResponse]:
     products = await list_products(db)
@@ -26,9 +29,10 @@ async def get_products(db: DatabaseSession) -> list[ProductResponse]:
             name=product.name,
             price=product.price,
             currency=product.currency,
-            display_price=format_price(product.price, product.currency),
             description=product.description,
             quantity=product.quantity,
+            display_price=format_price(product.price, product.currency),
+            image_url=product.image_url,
         )
         for product in products
     ]
