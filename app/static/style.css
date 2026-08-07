@@ -430,3 +430,22 @@ button:disabled {
 #load-orders {
     order: 5;
 }
+
+.product-image {
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    object-fit: cover;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    background: #eef2f8;
+    border: 1px solid #dde3ee;
+}
+
+.product-image-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #596579;
+    font-size: 2rem;
+    font-weight: 700;
+}
