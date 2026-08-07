@@ -20,6 +20,19 @@
 <main>
     <h2 class="page-title">Products</h2>
 
+    <form class="product-search" method="get" action="/">
+        <input
+            type="search"
+            name="search"
+            value="{{ search }}"
+            placeholder="Search products by name"
+        >
+        <button type="submit">Search</button>
+        {% if search %}
+            <a class="secondary-link-button" href="/">Clear</a>
+        {% endif %}
+    </form>
+
     <section class="product-grid">
         {% for product in products %}
             <article class="product-card">
@@ -47,12 +60,19 @@
                     </button>
                 </form>
             </article>
+        {% else %}
+            <p class="orders-summary">No products found.</p>
         {% endfor %}
     </section>
 
     <div class="pagination-controls">
         {% if has_previous %}
-            <a class="link-button" href="/?page={{ page - 1 }}">Previous</a>
+            <a
+                class="link-button"
+                href="/?page={{ page - 1 }}{% if search %}&search={{ search | urlencode }}{% endif %}"
+            >
+                Previous
+            </a>
         {% else %}
             <button type="button" disabled>Previous</button>
         {% endif %}
@@ -60,7 +80,12 @@
         <span>Page {{ page }} of {{ total_pages }}</span>
 
         {% if has_next %}
-            <a class="link-button" href="/?page={{ page + 1 }}">Next</a>
+            <a
+                class="link-button"
+                href="/?page={{ page + 1 }}{% if search %}&search={{ search | urlencode }}{% endif %}"
+            >
+                Next
+            </a>
         {% else %}
             <button type="button" disabled>Next</button>
         {% endif %}
