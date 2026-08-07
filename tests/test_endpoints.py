@@ -2686,3 +2686,35 @@ async def test_retry_fulfillment_direct_restores_status_when_enqueue_fails(
 
     assert updated_order is not None
     assert updated_order.fulfillment_status == FulfillmentStatus.failed
+
+
+@pytest.mark.anyio
+async def test_products_page_paginates_six_products(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    for index in range(7):
+        db_session.add(
+            Product(
+                id=f"product-{index}",
+                name=f"Product {index}",
+                price=1000,
+                currency="USD",
+                description="Test product",
+                quantity=1,
+                is_deleted=False,
+            )
+        )
+
+    await db_session.commit()
+
+    first_page = await client.get("/?page=1")
+    second_page = await client.get("/?page=2")
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+
+    assert first_page.text.count("Test product") == 6
+    assert second_page.text.count("Test product") == 1
+    assert "Page 1 of 2" in first_page.text
+    assert "Page 2 of 2" in second_page.text

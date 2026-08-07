@@ -43,9 +43,27 @@
                 <option value="failed">Failed</option>
             </select>
 
-            <input id="product-filter" type="text" placeholder="Product ID">
-
             <button type="button" id="load-orders">Load</button>
+
+            <input id="product-filter" type="text" placeholder="Product ID">
+        </div>
+
+            <div class="quick-filter-actions">
+                <button
+                    type="button"
+                    class="secondary-button"
+                    id="needs-attention-failed"
+                >
+                    Failed fulfillment
+                </button>
+                <button
+                    type="button"
+                    class="secondary-button"
+                    id="needs-attention-review"
+                >
+                    Payment review
+                </button>
+            </div>
         </div>
     </section>
 
@@ -245,7 +263,9 @@
         selectedOrderId = order.id;
         retryFulfillmentButton.disabled = !(
             order.status === "paid" &&
-            order.fulfillment_status !== "fulfilled"
+            ["pending", "failed", "payment_review"].includes(
+                order.fulfillment_status
+            )
         );
 
         detailTitle.textContent = `Order #${order.id}`;
@@ -404,6 +424,22 @@
 
     retryFulfillmentButton.addEventListener("click", () => {
         retryFulfillment();
+    });
+
+    document.getElementById("needs-attention-failed").addEventListener("click", () => {
+        page = 1;
+        statusFilter.value = "paid";
+        fulfillmentFilter.value = "failed";
+        productFilter.value = "";
+        loadOrders();
+    });
+
+    document.getElementById("needs-attention-review").addEventListener("click", () => {
+        page = 1;
+        statusFilter.value = "paid";
+        fulfillmentFilter.value = "payment_review";
+        productFilter.value = "";
+        loadOrders();
     });
 
     document.getElementById("load-orders").addEventListener("click", () => {
