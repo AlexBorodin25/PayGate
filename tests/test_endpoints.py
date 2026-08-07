@@ -2718,3 +2718,28 @@ async def test_products_page_paginates_six_products(
     assert second_page.text.count("Test product") == 1
     assert "Page 1 of 2" in first_page.text
     assert "Page 2 of 2" in second_page.text
+
+
+@pytest.mark.anyio
+async def test_products_page_renders_product_image(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    product = Product(
+        id="speaker",
+        name="Portable Speaker",
+        price=4999,
+        currency="USD",
+        description="A waterproof Bluetooth speaker.",
+        quantity=10,
+        image_url="https://example.com/speaker.jpg",
+        is_deleted=False,
+    )
+    db_session.add(product)
+    await db_session.commit()
+
+    response = await client.get("/")
+
+    assert response.status_code == 200
+    assert "https://example.com/speaker.jpg" in response.text
+    assert 'alt="Portable Speaker"' in response.text
